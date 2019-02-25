@@ -1,0 +1,9 @@
+build/
+*.c
+*.so
+*.o
+*.exe
+*.py[cho]
+*.sw[lmnop]
+*~
+\#*\#
