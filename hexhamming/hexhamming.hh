@@ -3,21 +3,12 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cassert>
-#include <vector>
-#include <algorithm>
-#include <iostream>
-#include <string>
 #include <cstring>
-#include <array>
-#ifdef __AVX__
-	#include <x86intrin.h>
-#endif
 
-///////////////////////////////////////////////////////////////
-// Structs and constants
-///////////////////////////////////////////////////////////////
-
+/**
+ * A 16-by-16 matrix containing the hamming distances of
+ * every hex character against every other hex character.
+ */
 const int LOOKUP_MATRIX[16][16] = {
   { 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4 },
   { 1, 0, 2, 1, 2, 1, 3, 2, 2, 1, 3, 2, 3, 2, 4, 3 },
@@ -37,31 +28,45 @@ const int LOOKUP_MATRIX[16][16] = {
   { 4, 3, 3, 2, 3, 2, 2, 1, 3, 2, 2, 1, 2, 1, 1, 0 }
 };
 
-///////////////////////////////////////////////////////////////
-// C++ Functions - String Matching
-///////////////////////////////////////////////////////////////
-inline unsigned int hamming_distance(const std::string &a, const std::string &b) {
-    if (a == b) {
+/**
+ * Returns the hamming distance of the binary between two hexadecimal strings
+ *
+ * @param a    hexadecimal char array
+ * @param b    hexadecimal char array
+ * @param a_string_length length of `a`
+ * @param b_string_length length of `b`
+ * @return      the number of bits different between the hexadecimal strings
+ */
+inline unsigned int hamming_distance(
+		const char* a,
+		const char* b,
+		size_t a_string_length,
+		size_t b_string_length
+	) {
+		// if both strings are the same, short circuit
+		// and return 0
+    if (strcmp(a, b) == 0) {
       return 0;
     }
-
-    size_t a_string_length = a.length();
 
     unsigned int result = 0;
     unsigned int val1, val2;
     for (size_t i = 0; i < a_string_length; ++i) {
-        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f')) {
-            throw std::invalid_argument(
-              "hex string '" + a + "' contains invalid char"
-            );
-        }
-        if ((b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
+				// check to make sure all characters are valid
+				// hexadecimal in both strings
+        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') ||
+				    (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
           throw std::invalid_argument(
-            "hex string '" + b + "' contains invalid char"
+            "hex string contains invalid char"
           );
         }
+
+				// Convert the hex ascii char to its actual hexadecimal value
+				// e.g., '0' = 0, 'A' = 10, etc.
+				// Note: this is case INSENSITIVE
         val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
         val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+
         result += LOOKUP_MATRIX[val1][val2];
     }
 
