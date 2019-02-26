@@ -6,20 +6,17 @@ with open("./README.rst", "r") as readme_file:
     LONG_DESCRIPTION = readme_file.read()
 
 setup(
-    name='Hamming',
+    name='Hex-Hamming',
     version='1.0',
-    description='',
-    url='https://github.com/mrecachinas/hex-hamming.git'
+    description='Fast Hamming distance calculation for hexidecimal strings',
+    url='https://github.com/mrecachinas/hex-hamming.git',
     long_description=LONG_DESCRIPTION,
     ext_modules=[
         Extension(
-            name="hamming",
-            sources=["hamming/python_hamming.cc", "hamming/hamming.cc"],
-
-            # TODO: Figure out why -O2 causes an illegal hardware instruction
+            name="hexhamming",
+            sources=["hexhamming/python_hexhamming.cc", "hexhamming/hexhamming.cc"],
             extra_compile_args=["-O0", "-mavx512f"],
-
-            include_dirs=['./hamming/'],
+            include_dirs=['./hexhamming/'],
             language="c++",
         )
     ],

@@ -1,5 +1,5 @@
-#ifndef PYTHON_STRING_MATCHING_WRAPPER_H
-#define PYTHON_STRING_MATCHING_WRAPPER_H
+#ifndef PYTHON_HEXHAMMING_WRAPPER_H
+#define PYTHON_HEXHAMMING_WRAPPER_H
 
 #include <iostream>
 #include <cstdio>
@@ -75,8 +75,8 @@ static PyMethodDef CompareMethods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-PyMODINIT_FUNC inithamming(void) {
-    PyObject *m = Py_InitModule3("hamming", CompareMethods, CompareDocstring);
+PyMODINIT_FUNC inithexhamming(void) {
+    PyObject *m = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
     if (m == NULL) {
         return;
     }

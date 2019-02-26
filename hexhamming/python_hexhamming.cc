@@ -1,6 +1,6 @@
 #include <Python.h>
-#include "./hamming.hh"
-#include "./python_hamming.hh"
+#include "./hexhamming.hh"
+#include "./python_hexhamming.hh"
 
 /**
  * Wrapper for converting std::array<int> to PyList containing PyInts

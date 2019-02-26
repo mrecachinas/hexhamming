@@ -1,4 +1,4 @@
-#include "hamming.hh"
+#include "hexhamming.hh"
 
 
 unsigned int hamming_distance_lookup(const std::string &a, const std::string &b) {
@@ -49,9 +49,14 @@ std::array<int, 8> str_to_hex256(const std::string &s) {
         printf("%s %d %d\n", __FILE__, __LINE__, i);
         hex_val.val = (s[i] > '9') ? (s[i] &~ 0x20) - 'A' + 10: (s[i] - '0');
         printf("%s %d %d\n", __FILE__, __LINE__, i);
-        result[i / 4] += (hex_val.val & 8) ^ (hex_val.val & 4) ^ (hex_val.val & 2) ^ (hex_val.val & 1);
+        result[i >> 3] ^= ((hex_val.val & 8) ^ (hex_val.val & 4) ^ (hex_val.val & 2) ^ (hex_val.val & 1)) << (32 - 4 - (4 * (i % 8)));
         printf("%s %d %d\n", __FILE__, __LINE__, i);
     }
+    printf("result = ");
+    for (size_t tmp = 0; tmp < 8; ++tmp) {
+        printf("%d, ", result[tmp]);
+    }
+    printf("\n");
     printf("%s %d\n", __FILE__, __LINE__);
     return result;
 }
@@ -122,6 +127,7 @@ unsigned int hamming_distance(const std::string &s1, const std::string &s2) {
     }
 }
 
+
 #ifdef __AVX__
 
 /**
@@ -143,8 +149,11 @@ unsigned int hamming_distance_sse(const std::string &s1, const std::string &s2) 
         __m256 a8 = _mm256_loadu_ps((float*)a.data());
         __m256 b8 = _mm256_loadu_ps((float*)b.data());
         __m256 c8 = _mm256_xor_ps(a8, b8);
-        int c[8]; _mm256_storeu_ps((float*)c, c8);
-        return c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] + c[7];
+        return __builtin_popcount(_mm256_extract_epi64(c8, 0)) +
+              __builtin_popcount(_mm256_extract_epi64(c8, 1)) +
+              __builtin_popcount(_mm256_extract_epi64(c8, 2)) +
+              __builtin_popcount(_mm256_extract_epi64(c8, 3));
+        // int c[8]; _mm256_storeu_ps((float*)c, c8);
     }
 }
 

@@ -1,5 +1,5 @@
-#ifndef HAMMING_H
-#define HAMMING_H
+#ifndef HEXHAMMING_H
+#define HEXHAMMING_H
 
 #include <cstdio>
 #include <cstdlib>
