@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import pytest
-from hamming import (
+from hexhamming import (
     hamming_distance,
     hamming_distance_lookup,
     fast_hamming_distance,
