@@ -37,22 +37,35 @@ const int LOOKUP_MATRIX[16][16] = {
   { 4, 3, 3, 2, 3, 2, 2, 1, 3, 2, 2, 1, 2, 1, 1, 0 }
 };
 
-// 4-bit struct for hex representation
-struct hex_byte {
-    unsigned val:4;
-};
-
 ///////////////////////////////////////////////////////////////
 // C++ Functions - String Matching
 ///////////////////////////////////////////////////////////////
-std::array<int, 8> str_to_hex256(const std::string &s);
-std::vector<bool> str_to_hex(const std::string &s);
-int xor_vec(const std::vector<bool> &v1, const std::vector<bool> &v2);
-unsigned int hamming_distance(const std::string &s1, const std::string &s2);
-unsigned int hamming_distance_lookup(const std::string &s1, const std::string &s2);
+inline unsigned int hamming_distance(const std::string &a, const std::string &b) {
+    if (a == b) {
+      return 0;
+    }
 
-#ifdef __AVX__
-	unsigned int hamming_distance_sse(const std::string &s1, const std::string &s2);
-#endif
+    size_t a_string_length = a.length();
+
+    unsigned int result = 0;
+    unsigned int val1, val2;
+    for (size_t i = 0; i < a_string_length; ++i) {
+        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f')) {
+            throw std::invalid_argument(
+              "hex string '" + a + "' contains invalid char"
+            );
+        }
+        if ((b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
+          throw std::invalid_argument(
+            "hex string '" + b + "' contains invalid char"
+          );
+        }
+        val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
+        val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+        result += LOOKUP_MATRIX[val1][val2];
+    }
+
+    return result;
+}
 
 #endif
