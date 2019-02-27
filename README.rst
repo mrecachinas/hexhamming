@@ -1,22 +1,43 @@
 Hexadecimal Hamming
 ====================
 
-Why yet another hamming distance library?
+|Pip|_ |Prs|_ |Travis|_ |Binder|_
+
+.. |Pip| image:: https://badge.fury.io/py/hexhamming.svg
+.. _Pip: https://badge.fury.io/py/hexhamming
+
+.. |Prs| image:: https://img.shields.io/badge/PRs-welcome-brightgreen.svg
+.. _Prs: .github/CONTRIBUTING.md#pull-requests
+
+.. |Travis| image:: https://travis-ci.org/mrecachinas/hexhamming.svg?branch=master
+.. _Travis: https://travis-ci.org/mrecachinas/hexhamming
+
+Why yet another Hamming distance library?
 -----------------------------------------
 
 There are a lot of fantastic (python) libraries that offer methods to calculate
 various edit distances, including Hamming distances: Distance, textdistance,
-scipy.spatial.distance.hamming, jellyfish, etc.
+scipy, jellyfish, etc.
 
 In this case, I needed a hamming distance library that worked on hexadecimal
-strings (i.e., ``str`` in Python-speak) and performed blazingly fast.
+strings (i.e., a Python ``str``) and performed blazingly fast.
 Furthermore, I often did not care about hex strings greater than 256 bits.
 That length constraint is different vs all the other libraries and enabled me
 to explore vectorization techniques via ``numba``, ``numpy``, and even
 ``SSE/AVX``.
 
 Lastly, I wanted to minimize dependencies, meaning you do not need to install
-``numpy``, ``gmpy``, ``cython``, ``pypy``, etc.
+``numpy``, ``gmpy``, ``cython``, ``pypy``, ``pythran``, etc.
+
+Eventually, after playing around with ``gmpy.popcount``, ``numba.jit``,
+``pythran.run``, ``numpy``, and ``AVX2``, I decided to write what I wanted
+in a raw C++ header. Note: the only C++-feature I'm exploiting is C++ exceptions;
+without that, this could easily be C. At this point, I'm using raw ``char*`` and
+``int*``, so exploring re-writing this in Fortran makes little sense. Vectorization
+techniques also ended up adding more overhead from data transfer between
+vector registers and normal registers; also, converting the hex strings to
+vector-register-ingestible floats from ``char*`` proved to have a non-trivial
+overhead.
 
 Installation
 -------------
@@ -38,7 +59,7 @@ dependencies::
 
 and make sure the tests pass with::
 
-    pytest # or tox
+    pytest # or tox -e py27,...
 
 Example
 -------
@@ -57,26 +78,11 @@ replace the above ``hamming_distance`` with ``fast_hamming_distance``.
 Note: to  use ``fast_hamming_distance``, your hex string must be 64
 characters or less (i.e., 256 bits or less).
 
-Benchmarks
-----------
+Benchmark
+---------
 
-Some benchmarks between ``hamming_distance``, ``hamming_distance_lookup``,
-and ``fast_hamming_distance``::
+Below is a benchmark using ``pytest-benchmark`` on my early 2016 1.2 GHz Intel
+m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3) with Python 2.7.15 and
+clang-1000.11.45.5::
 
-    [1] %timeit hamming_distance('deadbeef', '00000000')
-
-    [2] %timeit hamming_distance_lookup('deadbeef', '00000000')
-
-    [3] %timeit fast_hamming_distance('deadbeef', '00000000')
-
-Below are some other implementations that were considered::
-
-    [1] import gmpy
-    [2] def hamming_distance_gmpy(a, b):
-    ...     return gmpy.popcount(int(a, 16) ^ int(b, 16))
-
-    [3] %timeit hamming_distance_gmpy('deadbeef', '00000000')
-
-    [4] import numpy
-    [5] from numba import jit
-    [6] def hamming_distance_numpy(a, b):
+.. image:: https://github.com/mrecachinas/hexhamming/blob/master/docs/benchmark.png?raw=true
