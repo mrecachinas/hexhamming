@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-from distutils.core import setup, Extension
+from setuptools import setup, Extension
 
 
 with open("./README.rst", "r") as readme_file:
     LONG_DESCRIPTION = readme_file.read()
 
 setup(
-    name='Hex-Hamming',
+    name='hexhamming',
     version='1.0',
     description='Fast Hamming distance calculation for hexidecimal strings',
     url='https://github.com/mrecachinas/hex-hamming.git',
