@@ -19,10 +19,22 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args);
 ///////////////////////////////////////////////////////////////
 
 static char hamming_docstring[] =
-    "Calculate the hamming distance of two strings";
+    "Calculate the hamming distance of two strings\n\n"
+    "This is equivalent to\n\n"
+    "    bin(int(a, 16) ^ int(b, 16)).count('1')\n\n"
+    "with the only difference being it  was written in C++ and optimized\n"
+    "using a lookup table of pre-calculated hexadecimal hamming distances.\n"
+    ":param a: hexadecimal string\n"
+    ":type a: str\n"
+    ":param b: hexadecimal string\n"
+    ":type b: str\n"
+    ":returns: the hamming distance between the bits of two hexadecimal strings\n"
+    ":rtype: int\n"
+    ":raises ValueError: if either string doesn't exist, "
+    "if the strings are different lengths, or if the strings aren't valid hex";
 
 static char CompareDocstring[] =
-    "Module for calculating hamming distance of two hex strings";
+    "Module for calculating hamming distance of two hexadecimal strings";
 
 ///////////////////////////////////////////////////////////////
 // Python C-extension Initialization
