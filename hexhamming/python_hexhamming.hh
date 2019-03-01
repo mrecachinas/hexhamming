@@ -17,7 +17,6 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args);
 ///////////////////////////////////////////////////////////////
 // Docstrings
 ///////////////////////////////////////////////////////////////
-
 static char hamming_docstring[] =
     "Calculate the hamming distance of two strings\n\n"
     "This is equivalent to\n\n"
@@ -44,12 +43,42 @@ static PyMethodDef CompareMethods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-PyMODINIT_FUNC inithexhamming(void) {
-    PyObject *m = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
-    if (m == NULL) {
-        return;
-    }
-}
+#if PY_MAJOR_VERSION >= 3
 
+static struct PyModuleDef hexhammingdef = {
+        PyModuleDef_HEAD_INIT,
+        "hexhamming",
+        CompareDocstring,
+        -1,
+        CompareMethods,
+        NULL
+};
+
+#define INITERROR return NULL
+
+PyMODINIT_FUNC
+PyInit_hexhamming(void)
+
+#else
+#define INITERROR return
+
+PyMODINIT_FUNC
+inithexhamming(void)
+#endif
+
+{
+#if PY_MAJOR_VERSION >= 3
+    PyObject *module = PyModule_Create(&hexhammingdef);
+#else
+    PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
+#endif
+    if (module == NULL) {
+        INITERROR;
+    }
+
+#if PY_MAJOR_VERSION >= 3
+    return module;
+#endif
+}
 
 #endif
