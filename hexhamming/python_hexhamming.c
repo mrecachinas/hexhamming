@@ -1,4 +1,4 @@
-#include "./python_hexhamming.h"
+#include "python_hexhamming.h"
 
 /**
  * Python interface for `hamming_distance`

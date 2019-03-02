@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include <Python.h>
-#include "./hexhamming.h"
+#include "hexhamming.h"
 
 ///////////////////////////////////////////////////////////////
 // Python API Wrappers
