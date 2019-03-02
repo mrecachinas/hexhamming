@@ -100,14 +100,6 @@ To use the base C++ extension, you can simply run
     >>> hamming_distance('deadbeef', '00000000')
     24
 
-To use the lookup-based C++ extension, replace the above
-``hamming_distance`` with ``hamming_distance_lookup``.
-
-If your machine supports the Intel SSE4/AVX2 instruction set,
-replace the above ``hamming_distance`` with ``fast_hamming_distance``.
-Note: to  use ``fast_hamming_distance``, your hex string must be 64
-characters or less (i.e., 256 bits or less).
-
 Benchmark
 ---------
 
