@@ -9,7 +9,7 @@ setup(
     name='hexhamming',
     version='1.0',
     description='Fast Hamming distance calculation for hexadecimal strings',
-    url='https://github.com/mrecachinas/hex-hamming.git',
+    url='https://github.com/mrecachinas/hexhamming.git',
     long_description=LONG_DESCRIPTION,
     ext_modules=[
         Extension(
