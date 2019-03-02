@@ -72,22 +72,22 @@ overhead.
 Installation
 -------------
 
-To install, ensure you have Python 2.7 or 3.4+. Run
+To install, ensure you have Python 2.7 or 3.4+. Run::
 
     pip install hexhamming
 
-or to install from source
+or to install from source::
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
     python setup.py install # or pip install .
 
 If you want to contribute to hexhamming, you should install the dev
-dependencies
+dependencies::
 
     pip install -r requirements-dev.txt
 
-and make sure the tests pass with
+and make sure the tests pass with::
 
     pytest # or tox -e py27,...
 
