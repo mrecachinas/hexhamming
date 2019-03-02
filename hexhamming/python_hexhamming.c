@@ -38,13 +38,13 @@ const int LOOKUP_MATRIX[16][16] = {
  * @return      the number of bits different between the hexadecimal strings
  */
 inline int hamming_distance(
-		const char* a,
-		const char* b,
-		size_t a_string_length,
-		size_t b_string_length
-	) {
-		// if both strings are the same, short circuit
-		// and return 0
+    const char* a,
+    const char* b,
+    size_t a_string_length,
+    size_t b_string_length
+  ) {
+    // if both strings are the same, short circuit
+    // and return 0
     if (strcmp(a, b) == 0) {
       return 0;
     }
@@ -53,16 +53,16 @@ inline int hamming_distance(
     int val1, val2;
     size_t i;
     for (i = 0; i < a_string_length; ++i) {
-				// check to make sure all characters are valid
-				// hexadecimal in both strings
+        // check to make sure all characters are valid
+        // hexadecimal in both strings
         if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') ||
-				    (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
+            (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
             return -1;
         }
 
-				// Convert the hex ascii char to its actual hexadecimal value
-				// e.g., '0' = 0, 'A' = 10, etc.
-				// Note: this is case INSENSITIVE
+        // Convert the hex ascii char to its actual hexadecimal value
+        // e.g., '0' = 0, 'A' = 10, etc.
+        // Note: this is case INSENSITIVE
         val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
         val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
 
