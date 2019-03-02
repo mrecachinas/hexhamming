@@ -15,7 +15,6 @@ setup(
         Extension(
             name="hexhamming",
             sources=["hexhamming/python_hexhamming.c"],
-            include_dirs=['hexhamming/'],
         )
     ],
 )
