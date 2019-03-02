@@ -50,7 +50,8 @@ inline int hamming_distance(
 
     int result = 0;
     int val1, val2;
-    for (size_t i = 0; i < a_string_length; ++i) {
+    size_t i;
+    for (i = 0; i < a_string_length; ++i) {
 				// check to make sure all characters are valid
 				// hexadecimal in both strings
         if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') ||

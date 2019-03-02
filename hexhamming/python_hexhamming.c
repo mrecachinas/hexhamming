@@ -40,8 +40,7 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
 
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
-    unsigned dist = 0;
-    dist = hamming_distance(input_s1, input_s2, input_s1_len, input_s2_len);
+    int dist = hamming_distance(input_s1, input_s2, input_s1_len, input_s2_len);
     if (dist == -1) {
       // this should only happen if the strings contain
       // invalid hexadecimal characters
