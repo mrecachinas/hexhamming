@@ -1,4 +1,4 @@
-#include "./python_hexhamming.hh"
+#include "./python_hexhamming.h"
 
 /**
  * Python interface for `hamming_distance`
@@ -41,16 +41,15 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
     unsigned dist = 0;
-    try {
-        dist = hamming_distance(input_s1, input_s2, input_s1_len, input_s2_len);
-    } catch (const std::invalid_argument& e) {
-        // this should only happen if the strings contain
-        // invalid hexadecimal characters
-        PyErr_SetString(PyExc_ValueError, e.what());
-        return NULL;
+    dist = hamming_distance(input_s1, input_s2, input_s1_len, input_s2_len);
+    if (dist == -1) {
+      // this should only happen if the strings contain
+      // invalid hexadecimal characters
+      PyErr_SetString(PyExc_ValueError, "hex string contains invalid char");
+      return NULL;
+    } else {
+      // put the unsigned int into a Python Int object
+      // and return back to the caller!
+      return Py_BuildValue("I", dist);
     }
-
-    // put the unsigned int into a Python Int object
-    // and return back to the caller!
-    return Py_BuildValue("I", dist);
 }

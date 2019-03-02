@@ -14,10 +14,9 @@ setup(
     ext_modules=[
         Extension(
             name="hexhamming",
-            sources=["hexhamming/python_hexhamming.cc"],
+            sources=["hexhamming/python_hexhamming.c"],
             extra_compile_args=["-O2"],
             include_dirs=['./hexhamming/'],
-            language="c++",
         )
     ],
 )

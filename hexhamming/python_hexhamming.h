@@ -1,13 +1,10 @@
 #ifndef PYTHON_HEXHAMMING_WRAPPER_H
 #define PYTHON_HEXHAMMING_WRAPPER_H
 
-#include <iostream>
-#include <cstdio>
-#include <string>
-#include <cstring>
+#include <string.h>
 
 #include <Python.h>
-#include "./hexhamming.hh"
+#include "./hexhamming.h"
 
 ///////////////////////////////////////////////////////////////
 // Python API Wrappers

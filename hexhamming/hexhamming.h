@@ -1,9 +1,8 @@
 #ifndef HEXHAMMING_H
 #define HEXHAMMING_H
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <stdlib.h>
+#include <string.h>
 
 /**
  * A 16-by-16 matrix containing the hamming distances of
@@ -37,7 +36,7 @@ const int LOOKUP_MATRIX[16][16] = {
  * @param b_string_length length of `b`
  * @return      the number of bits different between the hexadecimal strings
  */
-inline unsigned int hamming_distance(
+inline int hamming_distance(
 		const char* a,
 		const char* b,
 		size_t a_string_length,
@@ -49,16 +48,14 @@ inline unsigned int hamming_distance(
       return 0;
     }
 
-    unsigned int result = 0;
-    unsigned int val1, val2;
+    int result = 0;
+    int val1, val2;
     for (size_t i = 0; i < a_string_length; ++i) {
 				// check to make sure all characters are valid
 				// hexadecimal in both strings
         if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') ||
 				    (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
-          throw std::invalid_argument(
-            "hex string contains invalid char"
-          );
+            return -1;
         }
 
 				// Convert the hex ascii char to its actual hexadecimal value
