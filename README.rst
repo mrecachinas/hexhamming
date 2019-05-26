@@ -61,8 +61,7 @@ Lastly, I wanted to minimize dependencies, meaning you do not need to install
 
 Eventually, after playing around with ``gmpy.popcount``, ``numba.jit``,
 ``pythran.run``, ``numpy``, and ``AVX2``, I decided to write what I wanted
-in a raw C++ header. Note: the only C++-feature I'm exploiting is C++ exceptions;
-without that, this could easily be C. At this point, I'm using raw ``char*`` and
+in a raw C header. At this point, I'm using raw ``char*`` and
 ``int*``, so exploring re-writing this in Fortran makes little sense. Vectorization
 techniques also ended up adding more overhead from data transfer between
 vector registers and normal registers; also, converting the hex strings to
