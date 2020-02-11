@@ -7,7 +7,7 @@ with open("./README.rst", "r") as readme_file:
 
 setup(
     name='hexhamming',
-    version='1.0',
+    version='1.1',
     description='Fast Hamming distance calculation for hexadecimal strings',
     url='https://github.com/mrecachinas/hexhamming.git',
     long_description=LONG_DESCRIPTION,
