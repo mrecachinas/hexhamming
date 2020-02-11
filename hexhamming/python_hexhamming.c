@@ -55,8 +55,8 @@ inline int hamming_distance(
     for (i = 0; i < a_string_length; ++i) {
         // check to make sure all characters are valid
         // hexadecimal in both strings
-        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') ||
-            (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f')) {
+        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') || (a[i] > '9' && a[i] < 'A') || (a[i] < '0') ||
+            (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f') || (b[i] > '9' && b[i] < 'A') || (b[i] < '0')) {
             return -1;
         }
 
