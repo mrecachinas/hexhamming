@@ -1,7 +1,7 @@
 Hexadecimal Hamming
 ====================
 
-|Pip|_ |Prs|_ |Travis|_ |Github|_
+|Pip|_ |Prs|_ |Github|_
 
 .. |Pip| image:: https://badge.fury.io/py/hexhamming.svg
 .. _Pip: https://badge.fury.io/py/hexhamming
