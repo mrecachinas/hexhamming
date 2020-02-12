@@ -63,10 +63,8 @@ Eventually, after playing around with ``gmpy.popcount``, ``numba.jit``,
 ``pythran.run``, ``numpy``, and ``AVX2``, I decided to write what I wanted
 in a raw C header. At this point, I'm using raw ``char*`` and
 ``int*``, so exploring re-writing this in Fortran makes little sense. Vectorization
-techniques also ended up adding more overhead from data transfer between
-vector registers and normal registers; also, converting the hex strings to
-vector-register-ingestible floats from ``char*`` proved to have a non-trivial
-overhead.
+techniques also ended up adding more overhead due to converting the hex strings to
+vector-register-ingestible floats from ``char*``.
 
 Installation
 -------------
