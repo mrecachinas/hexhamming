@@ -1,6 +1,13 @@
 name: build
 
-on: [push]
+on:
+  push:
+    paths:
+      - test/test_hexhamming.py
+      - setup.py
+      - hexhamming/python_hexhamming.c
+      - pytest.ini
+      - requirements-dev.txt
 
 jobs:
   build:
