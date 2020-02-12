@@ -1,7 +1,7 @@
 Hexadecimal Hamming
 ====================
 
-|Pip|_ |Prs|_ |Travis|_
+|Pip|_ |Prs|_ |Travis|_ |Github|_
 
 .. |Pip| image:: https://badge.fury.io/py/hexhamming.svg
 .. _Pip: https://badge.fury.io/py/hexhamming
@@ -9,8 +9,8 @@ Hexadecimal Hamming
 .. |Prs| image:: https://img.shields.io/badge/PRs-welcome-brightgreen.svg
 .. _Prs: .github/CONTRIBUTING.md#pull-requests
 
-.. |Travis| image:: https://travis-ci.org/mrecachinas/hexhamming.svg?branch=master
-.. _Travis: https://travis-ci.org/mrecachinas/hexhamming
+.. |Github| image:: https://github.com/mrecachinas/hexhamming/workflows/build/badge.svg
+.. _Github: https://github.com/mrecachinas/hexhamming/actions
 
 What does it do?
 ----------------
