@@ -73,32 +73,24 @@ vector-register-ingestible floats from ``char*``.
 Installation
 -------------
 
-To install, ensure you have Python 2.7 or 3.4+. Run
-
-.. highlight:: bash
+To install, ensure you have Python 2.7 or 3.4+. Run::
 
     pip install hexhamming
 
-or to install from source
-
-.. highlight:: bash
+or to install from source::
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
     python setup.py install # or pip install .
 
 If you want to contribute to hexhamming, you should install the dev
-dependencies
-
-.. highlight:: bash
+dependencies::
 
     pip install -r requirements-dev.txt
 
-and make sure the tests pass with
+and make sure the tests pass with::
 
-.. highlight:: bash
-
-    pytest # or tox -e py27,...
+    pytest -vls
 
 Example
 -------
@@ -107,9 +99,9 @@ To use the base C++ extension, you can simply run
 
 .. highlight:: python
 
-    >>> from hexhamming import hamming_distance
-    >>> hamming_distance("deadbeef", "00000000")
-    24
+>>> from hexhamming import hamming_distance
+>>> hamming_distance("deadbeef", "00000000")
+24
 
 Benchmark
 ---------
