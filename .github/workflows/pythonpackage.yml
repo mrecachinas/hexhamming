@@ -8,6 +8,7 @@ on:
       - hexhamming/python_hexhamming.c
       - pytest.ini
       - requirements-dev.txt
+      - .github/workflows/pythonpackage.yml
 
 jobs:
   build:
@@ -16,6 +17,7 @@ jobs:
     strategy:
       matrix:
         python-version: [2.7, 3.5, 3.6, 3.7, 3.8]
+        platform: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
     - uses: actions/checkout@v2
