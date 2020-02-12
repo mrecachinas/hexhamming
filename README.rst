@@ -22,25 +22,29 @@ This looks like::
     DEADBEEF = 11011110101011011011111011101111
     00000000 = 00000000000000000000000000000000
     XOR      = 11011110101011011011111011101111
-    Hamming  = number of 1s in XOR = 24
+    Hamming  = number of ones in DEADBEEF ^ 00000000 = 24
 
 This essentially amounts to
 
-    >>> import gmpy
-    >>> gmpy.popcount(0xdeadbeef ^ 0x00000000)
-    24
+.. highlight:: python
+
+>>> import gmpy
+>>> gmpy.popcount(0xdeadbeef ^ 0x00000000)
+24
 
 except with Python strings, so
 
-    >>> import gmpy
-    >>> gmpy.popcount(int('deadbeef', 16) ^ int('00000000', 16))
-    24
+.. highlight:: python
+
+>>> import gmpy
+>>> gmpy.popcount(int("deadbeef", 16) ^ int("00000000", 16))
+24
 
 A few assumptions are made and enforced:
 
 * this is a valid hexadecimal string (i.e., ``[a-fA-F0-9]+``)
 * the strings are the same length
-* the strings do not begin with ``'0x'``
+* the strings do not begin with ``"0x"``
 
 Why yet another Hamming distance library?
 -----------------------------------------
@@ -69,22 +73,30 @@ vector-register-ingestible floats from ``char*``.
 Installation
 -------------
 
-To install, ensure you have Python 2.7 or 3.4+. Run::
+To install, ensure you have Python 2.7 or 3.4+. Run
+
+.. highlight:: bash
 
     pip install hexhamming
 
-or to install from source::
+or to install from source
+
+.. highlight:: bash
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
     python setup.py install # or pip install .
 
 If you want to contribute to hexhamming, you should install the dev
-dependencies::
+dependencies
+
+.. highlight:: bash
 
     pip install -r requirements-dev.txt
 
-and make sure the tests pass with::
+and make sure the tests pass with
+
+.. highlight:: bash
 
     pytest # or tox -e py27,...
 
@@ -93,8 +105,10 @@ Example
 
 To use the base C++ extension, you can simply run
 
+.. highlight:: python
+
     >>> from hexhamming import hamming_distance
-    >>> hamming_distance('deadbeef', '00000000')
+    >>> hamming_distance("deadbeef", "00000000")
     24
 
 Benchmark
