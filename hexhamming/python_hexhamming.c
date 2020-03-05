@@ -53,18 +53,17 @@ inline int hamming_distance(
     int val1, val2;
     size_t i;
     for (i = 0; i < a_string_length; ++i) {
-        // check to make sure all characters are valid
-        // hexadecimal in both strings
-        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') || (a[i] > '9' && a[i] < 'A') || (a[i] < '0') ||
-            (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f') || (b[i] > '9' && b[i] < 'A') || (b[i] < '0')) {
-            return -1;
-        }
-
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
         val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
         val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+
+        // check to make sure all characters are valid
+        // hexadecimal in both strings
+        if (val1 > 16 || val1 < 0 || val2 > 16 || val2 < 0) {
+            return -1;
+        }
 
         result += LOOKUP_MATRIX[val1][val2];
     }
@@ -101,18 +100,17 @@ inline int check_hexstrings_within_dist(
     int val1, val2;
     size_t i;
     for (i = 0; i < a_string_length; ++i) {
-        // check to make sure all characters are valid
-        // hexadecimal in both strings
-        if ((a[i] > 'F' && a[i] < 'a') || (a[i] > 'f') || (a[i] > '9' && a[i] < 'A') || (a[i] < '0') ||
-            (b[i] > 'F' && b[i] < 'a') || (b[i] > 'f') || (b[i] > '9' && b[i] < 'A') || (b[i] < '0')) {
-            return -1;
-        }
-
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
         val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
         val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+
+        // check to make sure all characters are valid
+        // hexadecimal in both strings
+        if (val1 > 16 || val1 < 0 || val2 > 16 || val2 < 0) {
+            return -1;
+        }
 
         result += LOOKUP_MATRIX[val1][val2];
         if (result > max_dist) {
