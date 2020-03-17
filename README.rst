@@ -106,8 +106,14 @@ To use the base C++ extension, you can simply run
 Benchmark
 ---------
 
-Below is a benchmark using ``pytest-benchmark`` on my early 2016 1.2 GHz Intel
-m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3) with Python 2.7.15 and
-clang-1000.11.45.5.
+Note: For the below image, to show how optimized this is, I included a the benchmark of a function that looks like::
+
+    from gmpy import popcount
+    def ham(a, b):
+        return popcount(int(a, 16) ^ int(b, 16))
+
+Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.0 my early 2016 1.2 GHz Intel
+m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3) with Python 3.7.3 and
+Apple clang version 11.0.0 (clang-1100.0.33.17).
 
 .. image:: https://github.com/mrecachinas/hexhamming/blob/master/benchmark.png?raw=true
