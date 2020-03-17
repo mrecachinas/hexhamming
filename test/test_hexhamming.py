@@ -12,6 +12,7 @@ from hexhamming import check_hexstrings_within_dist, hamming_distance
     (
         ("abc", "abc", 0),
         ("000", "001", 1),
+        ("ABCDEF", "000001", 16),
         ("", "", 0),
         ("f" * 64, "0" * 64, 256),
         ("f" * 64, "f" * 64, 0),
@@ -67,3 +68,27 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
     with pytest.raises(exception) as excinfo:
         _ = check_hexstrings_within_dist(hex1, hex2, max_dist)
     assert msg in str(excinfo.value)
+
+
+def test_hamming_distance_bench_short(benchmark):
+    benchmark(hamming_distance, "ABC", "DEF")
+
+
+def test_hamming_distance_bench_short_same(benchmark):
+    benchmark(hamming_distance, "BBB", "BBB")
+
+
+def test_hamming_distance_bench_long_same(benchmark):
+    benchmark(hamming_distance, "B" * 1000, "B" * 1000)
+
+
+def test_hamming_distance_bench_long(benchmark):
+    benchmark(hamming_distance, "F" * 1000, "0" * 1000)
+
+
+def test_hamming_distance_bench_256(benchmark):
+    benchmark(hamming_distance, "F" * 64, "0" * 64)
+
+
+def test_check_hexstrings_within_dist_bench(benchmark):
+    benchmark(check_hexstrings_within_dist, "F" * 1000, "0" * 1000, 20)
