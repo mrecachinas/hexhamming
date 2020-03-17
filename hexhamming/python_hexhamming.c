@@ -6,43 +6,25 @@
 ///////////////////////////////////////////////////////////////
 
 /**
- * A 16-by-16 matrix containing the hamming distances of
- * every hex character against every other hex character.
+ * An array of size 16 containing the XOR result of
+ * two numbers between 0 and 15 (i.e., '0' - 'F').
  */
-const int LOOKUP_MATRIX[16][16] = {
-  { 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4 },
-  { 1, 0, 2, 1, 2, 1, 3, 2, 2, 1, 3, 2, 3, 2, 4, 3 },
-  { 1, 2, 0, 1, 2, 3, 1, 2, 2, 3, 1, 2, 3, 4, 2, 3 },
-  { 2, 1, 1, 0, 3, 2, 2, 1, 3, 2, 2, 1, 4, 3, 3, 2 },
-  { 1, 2, 2, 3, 0, 1, 1, 2, 2, 3, 3, 4, 1, 2, 2, 3 },
-  { 2, 1, 3, 2, 1, 0, 2, 1, 3, 2, 4, 3, 2, 1, 3, 2 },
-  { 2, 3, 1, 2, 1, 2, 0, 1, 3, 4, 2, 3, 2, 3, 1, 2 },
-  { 3, 2, 2, 1, 2, 1, 1, 0, 4, 3, 3, 2, 3, 2, 2, 1 },
-  { 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3 },
-  { 2, 1, 3, 2, 3, 2, 4, 3, 1, 0, 2, 1, 2, 1, 3, 2 },
-  { 2, 3, 1, 2, 3, 4, 2, 3, 1, 2, 0, 1, 2, 3, 1, 2 },
-  { 3, 2, 2, 1, 4, 3, 3, 2, 2, 1, 1, 0, 3, 2, 2, 1 },
-  { 2, 3, 3, 4, 1, 2, 2, 3, 1, 2, 2, 3, 0, 1, 1, 2 },
-  { 3, 2, 4, 3, 2, 1, 3, 2, 2, 1, 3, 2, 1, 0, 2, 1 },
-  { 3, 4, 2, 3, 2, 3, 1, 2, 2, 3, 1, 2, 1, 2, 0, 1 },
-  { 4, 3, 3, 2, 3, 2, 2, 1, 3, 2, 2, 1, 2, 1, 1, 0 }
-};
+const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
 
 /**
  * Returns the hamming distance of the binary between two hexadecimal strings
+ * of the same length.
  *
  * @param a    hexadecimal char array
  * @param b    hexadecimal char array
- * @param a_string_length length of `a`
- * @param b_string_length length of `b`
+ * @param string_length length of `a` and `b`
  * @return      the number of bits different between the hexadecimal strings
  */
 inline int hamming_distance(
     const char* a,
     const char* b,
-    size_t a_string_length,
-    size_t b_string_length
-  ) {
+    size_t string_length
+) {
     // if both strings are the same, short circuit
     // and return 0
     if (strcmp(a, b) == 0) {
@@ -52,20 +34,23 @@ inline int hamming_distance(
     int result = 0;
     int val1, val2;
     size_t i;
-    for (i = 0; i < a_string_length; ++i) {
+    for (i = 0; i < string_length; ++i) {
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
-        val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
-        val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+        // Also note:
+        //   * 65 = 'A'
+        //   * -55 = -65 + 10
+        val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 55: (a[i] - '0');
+        val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 55: (b[i] - '0');
 
         // check to make sure all characters are valid
         // hexadecimal in both strings
-        if (val1 > 16 || val1 < 0 || val2 > 16 || val2 < 0) {
+        if (val1 > 15 || val1 < 0 || val2 > 15 || val2 < 0) {
             return -1;
         }
 
-        result += LOOKUP_MATRIX[val1][val2];
+        result += LOOKUP[val1 ^ val2];
     }
 
     return result;
@@ -77,8 +62,7 @@ inline int hamming_distance(
  *
  * @param a    hexadecimal char array
  * @param b    hexadecimal char array
- * @param a_string_length length of `a`
- * @param b_string_length length of `b`
+ * @param string_length length of `a` and `b`
  * @param max_dist maximum allowable hamming distance
  * @return      whether or not the strings are within some
  *              predefined hamming distance; -1 means an error has occurred
@@ -86,8 +70,7 @@ inline int hamming_distance(
 inline int check_hexstrings_within_dist(
     const char* a,
     const char* b,
-    size_t a_string_length,
-    size_t b_string_length,
+    size_t string_length,
     size_t max_dist
   ) {
     // if both strings are the same, short circuit
@@ -99,20 +82,23 @@ inline int check_hexstrings_within_dist(
     size_t result = 0;
     int val1, val2;
     size_t i;
-    for (i = 0; i < a_string_length; ++i) {
+    for (i = 0; i < string_length; ++i) {
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
-        val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 'A' + 10: (a[i] - '0');
-        val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 'A' + 10: (b[i] - '0');
+        // Also note:
+        //   * 65 = 'A'
+        //   * -55 = -65 + 10
+        val1 = (a[i] > '9') ? (a[i] &~ 0x20) - 55: (a[i] - '0');
+        val2 = (b[i] > '9') ? (b[i] &~ 0x20) - 55: (b[i] - '0');
 
         // check to make sure all characters are valid
         // hexadecimal in both strings
-        if (val1 > 16 || val1 < 0 || val2 > 16 || val2 < 0) {
+        if (val1 > 15 || val1 < 0 || val2 > 15 || val2 < 0) {
             return -1;
         }
 
-        result += LOOKUP_MATRIX[val1][val2];
+        result += LOOKUP[val1 ^ val2];
         if (result > max_dist) {
             return 0;
         }
@@ -161,7 +147,7 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
 
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
-    int dist = hamming_distance(input_s1, input_s2, input_s1_len, input_s2_len);
+    int dist = hamming_distance(input_s1, input_s2, input_s1_len);
     if (dist == -1) {
       // this should only happen if the strings contain
       // invalid hexadecimal characters
@@ -228,7 +214,6 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
         input_s1,
         input_s2,
         input_s1_len,
-        input_s2_len,
         max_dist
     );
     if (result == -1) {
@@ -319,7 +304,7 @@ inithexhamming(void)
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "1.2.0")) {
+    if (PyModule_AddStringConstant(module, "__version__", "1.3.0")) {
         Py_XDECREF(module);
         INITERROR;
     }
