@@ -1,6 +1,2 @@
-coverage
 pytest
-pytest-runner
-pytest-coverage
 pytest-benchmark
-tox
