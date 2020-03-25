@@ -117,14 +117,17 @@ Benchmark
 Note: For the below image, to show how optimized this is, I included
 the benchmark of a function that looks like
 
-::
-
-    from gmpy import popcount
-    def ham(a, b):
-        return popcount(int(a, 16) ^ int(b, 16))
-
 Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.0
 my early 2016 1.2 GHz Intel m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3)
 with Python 3.7.3 and Apple clang version 11.0.0 (clang-1100.0.33.17).
 
-.. image:: https://github.com/mrecachinas/hexhamming/blob/master/benchmark.png?raw=true
+=======================================  ===========  ==========  =============  ========  ============
+Name                                       Mean (ns)    Std (ns)    Median (ns)    Rounds    Iterations
+=======================================  ===========  ==========  =============  ========  ============
+test_hamming_distance_bench_short_same       182.21      282.187        140.1      137742            30
+test_hamming_distance_bench_short            204.275     353.317        154.156    183723            32
+test_hamming_distance_bench_long_same        431.369     553.671        329.5      132838            20
+test_check_hexstrings_within_dist_bench      419.923     489.503        330.1       83718            20
+test_hamming_distance_bench_256              649.275    2854.9          505        172118             1
+test_hamming_distance_bench_long            3569.42     6408.05        2758        160591             1
+=======================================  ===========  ==========  =============  ========  ============
