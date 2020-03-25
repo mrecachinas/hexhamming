@@ -26,19 +26,19 @@ This looks like::
 
 This essentially amounts to
 
-.. highlight:: python
+::
 
->>> import gmpy
->>> gmpy.popcount(0xdeadbeef ^ 0x00000000)
-24
+    >>> import gmpy
+    >>> gmpy.popcount(0xdeadbeef ^ 0x00000000)
+    24
 
 except with Python strings, so
 
-.. highlight:: python
+::
 
->>> import gmpy
->>> gmpy.popcount(int("deadbeef", 16) ^ int("00000000", 16))
-24
+    >>> import gmpy
+    >>> gmpy.popcount(int("deadbeef", 16) ^ int("00000000", 16))
+    24
 
 A few assumptions are made and enforced:
 
@@ -73,22 +73,30 @@ vector-register-ingestible floats from ``char*``.
 Installation
 -------------
 
-To install, ensure you have Python 2.7 or 3.4+. Run::
+To install, ensure you have Python 2.7 or 3.4+. Run
+
+::
 
     pip install hexhamming
 
-or to install from source::
+or to install from source
+
+::
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
     python setup.py install # or pip install .
 
 If you want to contribute to hexhamming, you should install the dev
-dependencies::
+dependencies
+
+::
 
     pip install -r requirements-dev.txt
 
-and make sure the tests pass with::
+and make sure the tests pass with
+
+::
 
     pytest -vls
 
@@ -97,23 +105,26 @@ Example
 
 To use the base C++ extension, you can simply run
 
-.. highlight:: python
+::
 
->>> from hexhamming import hamming_distance
->>> hamming_distance("deadbeef", "00000000")
-24
+    >>> from hexhamming import hamming_distance
+    >>> hamming_distance("deadbeef", "00000000")
+    24
 
 Benchmark
 ---------
 
-Note: For the below image, to show how optimized this is, I included a the benchmark of a function that looks like::
+Note: For the below image, to show how optimized this is, I included
+the benchmark of a function that looks like
+
+::
 
     from gmpy import popcount
     def ham(a, b):
         return popcount(int(a, 16) ^ int(b, 16))
 
-Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.0 my early 2016 1.2 GHz Intel
-m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3) with Python 3.7.3 and
-Apple clang version 11.0.0 (clang-1100.0.33.17).
+Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.0
+my early 2016 1.2 GHz Intel m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3)
+with Python 3.7.3 and Apple clang version 11.0.0 (clang-1100.0.33.17).
 
 .. image:: https://github.com/mrecachinas/hexhamming/blob/master/benchmark.png?raw=true
