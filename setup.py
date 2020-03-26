@@ -6,15 +6,12 @@ with open("./README.rst", "r") as readme_file:
     LONG_DESCRIPTION = readme_file.read()
 
 setup(
-    name='hexhamming',
-    version='1.3.0',
-    description='Fast Hamming distance calculation for hexadecimal strings',
-    url='https://github.com/mrecachinas/hexhamming.git',
+    name="hexhamming",
+    version="1.3.1",
+    description="Fast Hamming distance calculation for hexadecimal strings",
+    url="https://github.com/mrecachinas/hexhamming.git",
     long_description=LONG_DESCRIPTION,
     ext_modules=[
-        Extension(
-            name="hexhamming",
-            sources=["hexhamming/python_hexhamming.c"],
-        )
+        Extension(name="hexhamming", sources=["hexhamming/python_hexhamming.c"])
     ],
 )
