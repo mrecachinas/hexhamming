@@ -32,6 +32,8 @@ def test_hamming_distance(hex1, hex2, expected):
         ("abc", "a", ValueError, "strings are NOT the same length"),
         ("lol", "foo", ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", ValueError, "hex string contains invalid char"),
+        ("f" * 32, "f" * 31 + "g", ValueError, "hex string contains invalid char"),
+        ("f" * 30, "f" * 29 + "g", ValueError, "hex string contains invalid char"),
     ),
 )
 def test_hamming_distance_errors(hex1, hex2, exception, msg):
@@ -70,20 +72,28 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
     assert msg in str(excinfo.value)
 
 
-def test_hamming_distance_bench_short(benchmark):
+def test_hamming_distance_bench_3(benchmark):
     benchmark(hamming_distance, "ABC", "DEF")
 
 
-def test_hamming_distance_bench_short_same(benchmark):
+def test_hamming_distance_bench_3_same(benchmark):
     benchmark(hamming_distance, "BBB", "BBB")
 
 
-def test_hamming_distance_bench_long_same(benchmark):
+def test_hamming_distance_bench_1000_same(benchmark):
     benchmark(hamming_distance, "B" * 1000, "B" * 1000)
 
 
-def test_hamming_distance_bench_long(benchmark):
+def test_hamming_distance_bench_1000(benchmark):
     benchmark(hamming_distance, "F" * 1000, "0" * 1000)
+
+
+def test_hamming_distance_bench_1024_same(benchmark):
+    benchmark(hamming_distance, "B" * 1024, "B" * 1024)
+
+
+def test_hamming_distance_bench_1024(benchmark):
+    benchmark(hamming_distance, "F" * 1024, "0" * 1024)
 
 
 def test_hamming_distance_bench_256(benchmark):

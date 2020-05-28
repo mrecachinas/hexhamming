@@ -12,6 +12,11 @@ setup(
     url="https://github.com/mrecachinas/hexhamming.git",
     long_description=LONG_DESCRIPTION,
     ext_modules=[
-        Extension(name="hexhamming", sources=["hexhamming/python_hexhamming.c"])
+        Extension(
+            name="hexhamming",
+            sources=["hexhamming/python_hexhamming.cc"],
+            extra_compile_args=["-march=native"],
+            language="c++11",
+        )
     ],
 )

@@ -1,4 +1,12 @@
 #include <string.h>
+#include <cstdio>
+#if __AVX__
+    #include <emmintrin.h>
+    #include <x86intrin.h>
+#endif
+#if __SSE4_1__
+    #include <smmintrin.h>
+#endif
 #include <Python.h>
 
 ///////////////////////////////////////////////////////////////
@@ -11,30 +19,20 @@
  */
 const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
 
-/**
- * Returns the hamming distance of the binary between two hexadecimal strings
- * of the same length.
- *
- * @param a    hexadecimal char array
- * @param b    hexadecimal char array
- * @param string_length length of `a` and `b`
- * @return      the number of bits different between the hexadecimal strings
- */
-inline int hamming_distance(
-    const char* a,
-    const char* b,
-    size_t string_length
-) {
-    // if both strings are the same, short circuit
-    // and return 0
-    if (strcmp(a, b) == 0) {
-      return 0;
-    }
+#if __SSE4_1__
+static inline int popcnt128(__m128i n) {
+    const __m128i n_hi = _mm_unpackhi_epi64(n, n);
+    #ifdef _MSC_VER
+        return __popcnt64(_mm_cvtsi128_si64(n)) + __popcnt64(_mm_cvtsi128_si64(n_hi));
+    #else
+        return __popcntq(_mm_cvtsi128_si64(n)) + __popcntq(_mm_cvtsi128_si64(n_hi));
+    #endif
+}
 
+inline int hamming_distance_loop(const char* a, const char* b, size_t string_length) {
     int result = 0;
     int val1, val2;
-    size_t i;
-    for (i = 0; i < string_length; ++i) {
+    for (size_t i = 0; i < string_length; ++i) {
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
@@ -52,7 +50,132 @@ inline int hamming_distance(
 
         result += LOOKUP[val1 ^ val2];
     }
+    return result;
+}
 
+/**
+ * SSE4.1 implementation of bitwise hamming distance of hex strings
+ *
+ * @param a    hexadecimal char array
+ * @param b    hexadecimal char array
+ * @param string_length length of `a` and `b` (MUST be a multiple of 16)
+ * @return      the number of bits different between the hexadecimal strings
+ */
+static inline int hamming_distance_sse41(const char* a, const char* b, size_t string_length) {
+    bool a_not_lt_0, a_not_gt_15, b_not_lt_0, b_not_gt_15;
+    int result = 0;
+    unsigned char values_as_array[16];
+
+    int fifteen_less = string_length - 15;
+    for (int i = 0; i < fifteen_less; i += 16) {
+        // load 16 chars from `a` and `b`
+        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
+        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
+
+        // Set up our masks for both branches of (x > '9') ? (x & ~0x20) - 55: x - '0'
+        __m128i subtract0vec = _mm_set1_epi8('0');  // ['0', '0', ...]
+        __m128i subtract55vec = _mm_set1_epi8(55);  // [55, 55, ...]
+        __m128i andvec = _mm_set1_epi8(~0x20);  // [-33, -33, ...]
+        __m128i isdigit_mask = _mm_set1_epi8('9');  // ['9', '9', ...]
+
+        // Perform the x > '9' comparison
+        __m128i a_cmp_mask = _mm_cmpgt_epi8(a16, isdigit_mask);
+        __m128i b_cmp_mask = _mm_cmpgt_epi8(b16, isdigit_mask);
+
+        // Compute for both branches
+
+        // x > '9'
+
+        // tmp = x & ~0x20
+        __m128i a_letter = _mm_and_si128(a16, andvec);
+        __m128i b_letter = _mm_and_si128(b16, andvec);
+
+        // tmp - 55
+        __m128i a_letter_normalized = _mm_sub_epi8(a_letter, subtract55vec);
+        __m128i b_letter_normalized = _mm_sub_epi8(b_letter, subtract55vec);
+
+        // x <= '9'
+
+        // x - '0'
+        __m128i a_digit_normalized = _mm_sub_epi8(a16, subtract0vec);
+        __m128i b_digit_normalized = _mm_sub_epi8(b16, subtract0vec);
+
+        // Put the ternary operator together
+        // Note: if result in _mm_cmpgt_ps is a 1, it means it's > '9'
+        __m128i a_hex = _mm_blendv_epi8(a_digit_normalized, a_letter_normalized, a_cmp_mask);
+        __m128i b_hex = _mm_blendv_epi8(b_digit_normalized, b_letter_normalized, b_cmp_mask);
+
+        // Check if greater than 15 or less than 0
+        __m128i zero = _mm_setzero_si128();
+        __m128i fifteen = _mm_set1_epi8(15);
+
+        // Greater than 15?
+        __m128i a15 = _mm_cmpgt_epi8(a_hex, fifteen);
+        __m128i b15 = _mm_cmpgt_epi8(b_hex, fifteen);
+
+        _mm_storeu_si128((__m128i*) &values_as_array[0], a_hex);
+
+        // Less than 0?
+        __m128i a0 = _mm_cmplt_epi16(a_hex, zero);
+        __m128i b0 = _mm_cmplt_epi16(b_hex, zero);
+
+        a_not_gt_15 = _mm_testz_si128(a15, a15);
+        b_not_gt_15 = _mm_testz_si128(b15, b15);
+        a_not_lt_0 = _mm_testz_si128(a0, a0);
+        b_not_lt_0 = _mm_testz_si128(b0, b0);
+
+        // If out of bounds, quit
+        if (!(a_not_lt_0 && a_not_gt_15 && b_not_lt_0 && b_not_gt_15)) {
+            return -1;
+        }
+
+        // Do the XOR
+        __m128 xor_result = _mm_xor_si128(a_hex, b_hex);
+
+        // Store the results
+        result += popcnt128(xor_result);
+    }
+    return result;
+}
+#endif
+
+/**
+ * Returns the hamming distance of the binary between two hexadecimal strings
+ * of the same length.
+ *
+ * @param a    hexadecimal char array
+ * @param b    hexadecimal char array
+ * @param string_length length of `a` and `b`
+ * @return      the number of bits different between the hexadecimal strings
+ */
+inline int hamming_distance(
+    const char* a,
+    const char* b,
+    size_t string_length
+) {
+    int result;
+
+#if __SSE4_1__
+    result = hamming_distance_sse41(a, b, string_length);
+    char mod16 = string_length & 15;
+    if (mod16 != 0) {
+        int fifteen_less = string_length - mod16;
+        int start_index = fifteen_less >= 0 ? fifteen_less : 0;
+        int dist = hamming_distance_loop(&a[start_index], &b[start_index], mod16);
+        if (dist == -1) {
+            return dist;
+        } else {
+            result += dist;
+        }
+    }
+#else
+    // if both strings are the same, short circuit
+    // and return 0
+    if (strcmp(a, b) == 0) {
+      return 0;
+    }
+    result = hamming_distance_loop(a, b, string_length);
+#endif
     return result;
 }
 
