@@ -57,18 +57,16 @@ In this case, I needed a hamming distance library that worked on hexadecimal
 strings (i.e., a Python ``str``) and performed blazingly fast.
 Furthermore, I often did not care about hex strings greater than 256 bits.
 That length constraint is different vs all the other libraries and enabled me
-to explore vectorization techniques via ``numba``, ``numpy``, and even
-``SSE/AVX``.
+to explore vectorization techniques via ``numba``, ``numpy``, and
+``SSE/AVX`` intrinsics.
 
 Lastly, I wanted to minimize dependencies, meaning you do not need to install
 ``numpy``, ``gmpy``, ``cython``, ``pypy``, ``pythran``, etc.
 
 Eventually, after playing around with ``gmpy.popcount``, ``numba.jit``,
-``pythran.run``, ``numpy``, and ``AVX2``, I decided to write what I wanted
-in a raw C header. At this point, I'm using raw ``char*`` and
-``int*``, so exploring re-writing this in Fortran makes little sense. Vectorization
-techniques also ended up adding more overhead due to converting the hex strings to
-vector-register-ingestible floats from ``char*``.
+``pythran.run``, ``numpy``, I decided to write what I wanted
+in essentially raw C. At this point, I'm using raw ``char*`` and
+``int*``, so exploring re-writing this in Fortran makes little sense.
 
 Installation
 -------------
