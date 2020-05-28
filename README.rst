@@ -101,7 +101,7 @@ and make sure the tests pass with
 Example
 -------
 
-To use the base C++ extension, you can simply run
+Using ``hexhamming`` is as simple as
 
 ::
 
