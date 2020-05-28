@@ -1,4 +1,4 @@
-Hexadecimal Hamming
+``hexhamming``
 ====================
 
 |Pip|_ |Prs|_ |Github|_
