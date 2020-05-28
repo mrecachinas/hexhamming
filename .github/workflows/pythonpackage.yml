@@ -5,7 +5,7 @@ on:
     paths:
       - test/test_hexhamming.py
       - setup.py
-      - hexhamming/python_hexhamming.c
+      - hexhamming/python_hexhamming.cc
       - pytest.ini
       - requirements-dev.txt
       - .github/workflows/pythonpackage.yml
