@@ -130,7 +130,7 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
         }
 
         // Do the XOR
-        __m128 xor_result = _mm_xor_si128(a_hex, b_hex);
+        __m128i xor_result = _mm_xor_si128(a_hex, b_hex);
 
         // Store the results
         result += popcnt128(xor_result);
