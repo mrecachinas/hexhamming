@@ -1,5 +1,4 @@
-#include <string.h>
-#include <cstdio>
+#include <cstring>
 #if __AVX__
     #include <emmintrin.h>
     #include <x86intrin.h>
@@ -64,7 +63,6 @@ inline int hamming_distance_loop(const char* a, const char* b, size_t string_len
 static inline int hamming_distance_sse41(const char* a, const char* b, size_t string_length) {
     bool a_not_lt_0, a_not_gt_15, b_not_lt_0, b_not_gt_15;
     int result = 0;
-    unsigned char values_as_array[16];
 
     int fifteen_less = string_length - 15;
     for (int i = 0; i < fifteen_less; i += 16) {
@@ -112,8 +110,6 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
         // Greater than 15?
         __m128i a15 = _mm_cmpgt_epi8(a_hex, fifteen);
         __m128i b15 = _mm_cmpgt_epi8(b_hex, fifteen);
-
-        _mm_storeu_si128((__m128i*) &values_as_array[0], a_hex);
 
         // Less than 0?
         __m128i a0 = _mm_cmplt_epi16(a_hex, zero);
