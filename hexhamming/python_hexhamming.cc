@@ -153,6 +153,10 @@ inline int hamming_distance(
 
 #if __SSE4_1__
     result = hamming_distance_sse41(a, b, string_length);
+    if (result == -1) {
+        return result;
+    }
+    
     char mod16 = string_length & 15;
     if (mod16 != 0) {
         int fifteen_less = string_length - mod16;
