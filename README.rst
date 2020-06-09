@@ -119,10 +119,12 @@ with Python 3.7.3 and Apple clang version 11.0.0 (clang-1100.0.33.17).
 =======================================  ===========  ==========  =============  ========  ============
 Name                                       Mean (ns)    Std (ns)    Median (ns)    Rounds    Iterations
 =======================================  ===========  ==========  =============  ========  ============
-test_hamming_distance_bench_short_same       182.21      282.187        140.1      137742            30
-test_hamming_distance_bench_short            204.275     353.317        154.156    183723            32
-test_hamming_distance_bench_long_same        431.369     553.671        329.5      132838            20
-test_check_hexstrings_within_dist_bench      419.923     489.503        330.1       83718            20
-test_hamming_distance_bench_256              649.275    2854.9          505        172118             1
-test_hamming_distance_bench_long            3569.42     6408.05        2758        160591             1
+test_hamming_distance_bench_3                93.8        10.5          94.3         53268           200
+test_hamming_distance_bench_3_same           94.2        15.2          94.9        102146           100
+test_check_hexstrings_within_dist_bench      231.9      104.2         216.5        195122            22
+test_hamming_distance_bench_256              97.5        34.1          94.0        195122            22
+test_hamming_distance_bench_1000             489.8      159.4         477.5         94411            20
+test_hamming_distance_bench_1000_same        497.8       87.8         496.6         18971            20
+test_hamming_distance_bench_1024             509.9      299.5         506.7         18652            10
+test_hamming_distance_bench_1024_same        467.4      205.9         450.4        181819            10
 =======================================  ===========  ==========  =============  ========  ============
