@@ -112,9 +112,9 @@ Using ``hexhamming`` is as simple as
 Benchmark
 ---------
 
-Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.0
-my early 2016 1.2 GHz Intel m5 8 GB 1867 MHz LPDDR3 macOS Mojave (10.14.3)
-with Python 3.7.3 and Apple clang version 11.0.0 (clang-1100.0.33.17).
+Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.2
+my 2020 2.0 GHz quad-core Intel Core i5 16 GB 3733 MHz LPDDR4 macOS Catalina (10.15.5)
+with Python 3.7.3 and Apple clang version 11.0.3 (clang-1103.0.32.62).
 
 =======================================  ===========  ==========  =============  ========  ============
 Name                                       Mean (ns)    Std (ns)    Median (ns)    Rounds    Iterations
