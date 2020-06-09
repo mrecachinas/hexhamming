@@ -165,11 +165,6 @@ inline int hamming_distance(
         }
     }
 #else
-    // if both strings are the same, short circuit
-    // and return 0
-    if (strcmp(a, b) == 0) {
-      return 0;
-    }
     result = hamming_distance_loop(a, b, string_length);
 #endif
     return result;
