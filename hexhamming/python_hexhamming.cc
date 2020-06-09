@@ -27,6 +27,7 @@ static inline int popcnt128(__m128i n) {
         return __popcntq(_mm_cvtsi128_si64(n)) + __popcntq(_mm_cvtsi128_si64(n_hi));
     #endif
 }
+#endif
 
 inline int hamming_distance_loop(const char* a, const char* b, size_t string_length) {
     int result = 0;
@@ -52,6 +53,7 @@ inline int hamming_distance_loop(const char* a, const char* b, size_t string_len
     return result;
 }
 
+#if __SSE4_1__
 /**
  * SSE4.1 implementation of bitwise hamming distance of hex strings
  *
