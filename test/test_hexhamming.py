@@ -34,6 +34,8 @@ def test_hamming_distance(hex1, hex2, expected):
         ("000abcdef", "011abcdgf", ValueError, "hex string contains invalid char"),
         ("f" * 32, "f" * 31 + "g", ValueError, "hex string contains invalid char"),
         ("f" * 30, "f" * 29 + "g", ValueError, "hex string contains invalid char"),
+        ("ggg", "ggg", ValueError, "hex string contains invalid char"),
+        ("g" * 15 + "fff", "g" * 15 + "000", ValueError, "hex string contains invalid char"),
     ),
 )
 def test_hamming_distance_errors(hex1, hex2, exception, msg):
