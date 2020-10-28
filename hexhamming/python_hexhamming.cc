@@ -1,5 +1,9 @@
 #include <cstring>
-#include <x86intrin.h>
+#if _MSC_VER
+  #include <intrin.h>
+#else
+  #include <x86intrin.h>
+#endif
 #include <Python.h>
 
 ///////////////////////////////////////////////////////////////
