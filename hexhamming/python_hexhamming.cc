@@ -418,7 +418,7 @@ inithexhamming(void)
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "1.3.1")) {
+    if (PyModule_AddStringConstant(module, "__version__", "1.4.0")) {
         Py_XDECREF(module);
         INITERROR;
     }
