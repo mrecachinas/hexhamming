@@ -35,7 +35,12 @@ def test_hamming_distance(hex1, hex2, expected):
         ("f" * 32, "f" * 31 + "g", ValueError, "hex string contains invalid char"),
         ("f" * 30, "f" * 29 + "g", ValueError, "hex string contains invalid char"),
         ("ggg", "ggg", ValueError, "hex string contains invalid char"),
-        ("g" * 15 + "fff", "g" * 15 + "000", ValueError, "hex string contains invalid char"),
+        (
+            "g" * 15 + "fff",
+            "g" * 15 + "000",
+            ValueError,
+            "hex string contains invalid char",
+        ),
     ),
 )
 def test_hamming_distance_errors(hex1, hex2, exception, msg):
@@ -59,8 +64,20 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
 @pytest.mark.parametrize(
     "hex1,hex2,max_dist,exception,msg",
     (
-        ("000abcdef", "011abcdef", None, ValueError, "error occurred while parsing arguments"),
-        ("000abcdef", "011abcdef", "HELLO", ValueError, "error occurred while parsing arguments"),
+        (
+            "000abcdef",
+            "011abcdef",
+            None,
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
+        (
+            "000abcdef",
+            "011abcdef",
+            "HELLO",
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
         ("000abcdef", "011abcdef", -1, ValueError, "`max_dist` must be >0"),
         ("000abcdef", "011abcdzz", 3, ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", 3, ValueError, "hex string contains invalid char"),
@@ -74,32 +91,30 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
     assert msg in str(excinfo.value)
 
 
-def test_hamming_distance_bench_3(benchmark):
-    benchmark(hamming_distance, "ABC", "DEF")
-
-
-def test_hamming_distance_bench_3_same(benchmark):
-    benchmark(hamming_distance, "BBB", "BBB")
-
-
-def test_hamming_distance_bench_1000_same(benchmark):
-    benchmark(hamming_distance, "B" * 1000, "B" * 1000)
-
-
-def test_hamming_distance_bench_1000(benchmark):
-    benchmark(hamming_distance, "F" * 1000, "0" * 1000)
-
-
-def test_hamming_distance_bench_1024_same(benchmark):
-    benchmark(hamming_distance, "B" * 1024, "B" * 1024)
-
-
-def test_hamming_distance_bench_1024(benchmark):
-    benchmark(hamming_distance, "F" * 1024, "0" * 1024)
-
-
-def test_hamming_distance_bench_256(benchmark):
-    benchmark(hamming_distance, "F" * 64, "0" * 64)
+@pytest.mark.benchmark(group="hamming_distance")
+@pytest.mark.parametrize(
+    ("hex1", "hex2"),
+    (
+        ("ABC", "DEF"),
+        ("BBB", "BBB"),
+        ("B" * 1000, "B" * 1000),
+        ("F" * 1000, "0" * 1000),
+        ("B" * 1024, "B" * 1024),
+        ("F" * 1024, "0" * 1024),
+        ("F" * 64, "0" * 64),
+    ),
+    ids=(
+        "3-diff",
+        "3-same",
+        "1000-same",
+        "1000-diff",
+        "1024-same",
+        "1024-diff",
+        "64-diff",
+    ),
+)
+def test_hamming_distance_bench(benchmark, hex1, hex2):
+    benchmark(hamming_distance, hex1, hex2)
 
 
 def test_check_hexstrings_within_dist_bench(benchmark):
