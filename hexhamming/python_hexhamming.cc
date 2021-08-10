@@ -4,6 +4,7 @@
 #else
   #include <x86intrin.h>
 #endif
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
 ///////////////////////////////////////////////////////////////
@@ -61,10 +62,36 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
     int result = 0;
 
     int fifteen_less = string_length - 15;
+    
+    __m128i zero = _mm_setzero_si128();
+    __m128i fifteen = _mm_set1_epi8(15);
+    __m128i xor_result, a_hex, b_hex;
     for (int i = 0; i < fifteen_less; i += 16) {
+        // Check if greater than 15 or less than 0
+
         // load 16 chars from `a` and `b`
         __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
         __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
+
+        __m128i a_hex_lt0 = _mm_cmplt_epi16(a16, zero);
+        __m128i b_hex_lt0 = _mm_cmplt_epi16(b16, zero);
+        __m128i a_hex_gt15 = _mm_cmpgt_epi16(a16, fifteen);
+        __m128i b_hex_gt15 = _mm_cmpgt_epi16(b16, fifteen);
+
+        bool a_hex_gt0 = _mm_testz_si128(a_hex_lt0, a_hex_lt0);
+        bool b_hex_gt0 = _mm_testz_si128(b_hex_lt0, b_hex_lt0);
+        bool a_hex_lt15 = _mm_testz_si128(a_hex_gt15, a_hex_gt15);
+        bool b_hex_lt15 = _mm_testz_si128(b_hex_gt15, b_hex_gt15);
+
+        if (a_hex_gt0 && b_hex_gt0 && a_hex_lt15 && b_hex_lt15) {
+            // Do the XOR
+            xor_result = _mm_xor_si128(a16, b16);
+
+            // Store the results
+            result += popcnt128(xor_result);
+
+            continue;
+        }
 
         // Set up our masks for both branches of (x > '9') ? (x & ~0x20) - 55: x - '0'
         __m128i subtract0vec = _mm_set1_epi8('0');  // ['0', '0', ...]
@@ -96,12 +123,8 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
 
         // Put the ternary operator together
         // Note: if result in _mm_cmpgt_ps is a 1, it means it's > '9'
-        __m128i a_hex = _mm_blendv_epi8(a_digit_normalized, a_letter_normalized, a_cmp_mask);
-        __m128i b_hex = _mm_blendv_epi8(b_digit_normalized, b_letter_normalized, b_cmp_mask);
-
-        // Check if greater than 15 or less than 0
-        __m128i zero = _mm_setzero_si128();
-        __m128i fifteen = _mm_set1_epi8(15);
+        a_hex = _mm_blendv_epi8(a_digit_normalized, a_letter_normalized, a_cmp_mask);
+        b_hex = _mm_blendv_epi8(b_digit_normalized, b_letter_normalized, b_cmp_mask);
 
         // Greater than 15?
         __m128i a15 = _mm_cmpgt_epi8(a_hex, fifteen);
@@ -233,11 +256,13 @@ inline int check_hexstrings_within_dist(
 static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
     char *input_s1;
     char *input_s2;
+    size_t input_s1_len;
+    size_t input_s2_len;
 
     // get the two strings from `args`
     // if they are incorrect types (i.e., not 's'), this will raise
     // a ValueError
-    if (!PyArg_ParseTuple(args, "ss", &input_s1, &input_s2)) {
+    if (!PyArg_ParseTuple(args, "s#s#", &input_s1, &input_s1_len, &input_s2, &input_s2_len)) {
         PyErr_SetString(
             PyExc_ValueError,
             "error occurred while parsing arguments"
@@ -251,9 +276,7 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    size_t input_s1_len = strlen(input_s1);
-    size_t input_s2_len = strlen(input_s2);
-
+    // if the two strings are not the same length, can't move on, so raise
     if (input_s1_len != input_s2_len) {
         PyErr_SetString(PyExc_ValueError, "strings are NOT the same length");
         return NULL;
