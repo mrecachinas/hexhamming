@@ -51,7 +51,11 @@ inline int hamming_distance_loop_string(const char* a, const char* b, size_t str
 inline int hamming_distance_loop_byte(const char* a, const char* b, size_t string_length) {
     int result = 0;
     for (size_t i = 0; i < string_length; ++i) {
+#if _MSC_VER
+        result += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
+#else
         result += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
+#endif
     }
     return result;
 }
