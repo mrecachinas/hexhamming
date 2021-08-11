@@ -20,6 +20,17 @@ from hexhamming import check_hexstrings_within_dist, hamming_distance_string, ha
         ("f" * 10000, "0" * 10000, 40000),
         ("f" * 10000, "f" * 10000, 0),
     ),
+    ids=(
+        "3-same",
+        "3-diff",
+        "6-different",
+        "empty-empty",
+        "64-f-0",
+        "64-f-f",
+        "64-0-0",
+        "10000-f-0",
+        "10000-f-f",
+    ),
 )
 def test_hamming_distance_string(hex1, hex2, expected):
     assert hamming_distance_string(hex1, hex2) == expected
@@ -37,6 +48,17 @@ def test_hamming_distance_string(hex1, hex2, expected):
         (b"\x00" * 32, b"\x00" * 32, 0),
         (b"\xff" * 5000, b"\x00" * 5000, 40000),
         (b"\xff" * 5000, b"\xff" * 5000, 0),
+    ),
+    ids=(
+        "4-same",
+        "2-diff",
+        "6-different",
+        "empty-empty",
+        "64-f-0",
+        "64-f-f",
+        "64-0-0",
+        "10000-f-0",
+        "10000-f-f",
     ),
 )
 def test_hamming_distance_byte(hex1, hex2, expected):
@@ -61,7 +83,7 @@ def test_hamming_distance_byte(hex1, hex2, expected):
         ),
     ),
 )
-def test_hamming_distance_errors(hex1, hex2, exception, msg):
+def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     with pytest.raises(exception) as excinfo:
         _ = hamming_distance_string(hex1, hex2)
     assert msg in str(excinfo.value)
