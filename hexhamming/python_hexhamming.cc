@@ -4,6 +4,7 @@
 #else
   #include <x86intrin.h>
 #endif
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
 ///////////////////////////////////////////////////////////////
@@ -23,7 +24,7 @@ static inline int popcnt128(__m128i n) {
 }
 #endif
 
-inline int hamming_distance_loop(const char* a, const char* b, size_t string_length) {
+inline int hamming_distance_loop_string(const char* a, const char* b, size_t string_length) {
     int result = 0;
     int val1, val2;
     for (size_t i = 0; i < string_length; ++i) {
@@ -47,6 +48,18 @@ inline int hamming_distance_loop(const char* a, const char* b, size_t string_len
     return result;
 }
 
+inline int hamming_distance_loop_byte(const char* a, const char* b, size_t string_length) {
+    int result = 0;
+    for (size_t i = 0; i < string_length; ++i) {
+#if _MSC_VER
+        result += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
+#else
+        result += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
+#endif
+    }
+    return result;
+}
+
 #if __SSE4_1__
 /**
  * SSE4.1 implementation of bitwise hamming distance of hex strings
@@ -56,12 +69,18 @@ inline int hamming_distance_loop(const char* a, const char* b, size_t string_len
  * @param string_length length of `a` and `b` (MUST be a multiple of 16)
  * @return      the number of bits different between the hexadecimal strings
  */
-static inline int hamming_distance_sse41(const char* a, const char* b, size_t string_length) {
+static inline int hamming_distance_sse41_string(const char* a, const char* b, size_t string_length) {
     bool a_not_lt_0, a_not_gt_15, b_not_lt_0, b_not_gt_15;
     int result = 0;
 
     int fifteen_less = string_length - 15;
+    
+    __m128i zero = _mm_setzero_si128();
+    __m128i fifteen = _mm_set1_epi8(15);
+    __m128i xor_result, a_hex, b_hex;
     for (int i = 0; i < fifteen_less; i += 16) {
+        // Check if greater than 15 or less than 0
+
         // load 16 chars from `a` and `b`
         __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
         __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
@@ -96,12 +115,8 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
 
         // Put the ternary operator together
         // Note: if result in _mm_cmpgt_ps is a 1, it means it's > '9'
-        __m128i a_hex = _mm_blendv_epi8(a_digit_normalized, a_letter_normalized, a_cmp_mask);
-        __m128i b_hex = _mm_blendv_epi8(b_digit_normalized, b_letter_normalized, b_cmp_mask);
-
-        // Check if greater than 15 or less than 0
-        __m128i zero = _mm_setzero_si128();
-        __m128i fifteen = _mm_set1_epi8(15);
+        a_hex = _mm_blendv_epi8(a_digit_normalized, a_letter_normalized, a_cmp_mask);
+        b_hex = _mm_blendv_epi8(b_digit_normalized, b_letter_normalized, b_cmp_mask);
 
         // Greater than 15?
         __m128i a15 = _mm_cmpgt_epi8(a_hex, fifteen);
@@ -122,7 +137,26 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
         }
 
         // Do the XOR
-        __m128i xor_result = _mm_xor_si128(a_hex, b_hex);
+        xor_result = _mm_xor_si128(a_hex, b_hex);
+
+        // Store the results
+        result += popcnt128(xor_result);
+    }
+    return result;
+}
+
+static inline int hamming_distance_sse41_byte(const char* a, const char* b, size_t length) {
+    int result = 0;
+    int fifteen_less = length - 15;
+    
+    __m128i xor_result;
+    for (int i = 0; i < fifteen_less; i += 16) {
+        // load 16 chars from `a` and `b`
+        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
+        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
+
+        // Do the XOR
+        xor_result = _mm_xor_si128(a16, b16);
 
         // Store the results
         result += popcnt128(xor_result);
@@ -140,7 +174,7 @@ static inline int hamming_distance_sse41(const char* a, const char* b, size_t st
  * @param string_length length of `a` and `b`
  * @return      the number of bits different between the hexadecimal strings
  */
-inline int hamming_distance(
+inline int hamming_distance_string(
     const char* a,
     const char* b,
     size_t string_length
@@ -148,7 +182,7 @@ inline int hamming_distance(
     int result;
 
 #if __SSE4_1__
-    result = hamming_distance_sse41(a, b, string_length);
+    result = hamming_distance_sse41_string(a, b, string_length);
     if (result == -1) {
         return result;
     }
@@ -157,7 +191,7 @@ inline int hamming_distance(
     if (mod16 != 0) {
         int fifteen_less = string_length - mod16;
         int start_index = fifteen_less >= 0 ? fifteen_less : 0;
-        int dist = hamming_distance_loop(&a[start_index], &b[start_index], mod16);
+        int dist = hamming_distance_loop_string(&a[start_index], &b[start_index], mod16);
         if (dist == -1) {
             return dist;
         } else {
@@ -165,7 +199,46 @@ inline int hamming_distance(
         }
     }
 #else
-    result = hamming_distance_loop(a, b, string_length);
+    result = hamming_distance_loop_string(a, b, string_length);
+#endif
+    return result;
+}
+
+/**
+ * Returns the hamming distance of the binary between two hexadecimal strings
+ * of the same length.
+ *
+ * @param a    hexadecimal char array
+ * @param b    hexadecimal char array
+ * @param length length of `a` and `b`
+ * @return      the number of bits different between the hexadecimal strings
+ */
+inline int hamming_distance_byte(
+    const char* a,
+    const char* b,
+    size_t length
+) {
+    int result;
+
+#if __SSE4_1__
+    result = hamming_distance_sse41_byte(a, b, length);
+    if (result == -1) {
+        return result;
+    }
+    
+    char mod16 = length & 15;
+    if (mod16 != 0) {
+        int fifteen_less = length - mod16;
+        int start_index = fifteen_less >= 0 ? fifteen_less : 0;
+        int dist = hamming_distance_loop_byte(&a[start_index], &b[start_index], mod16);
+        if (dist == -1) {
+            return dist;
+        } else {
+            result += dist;
+        }
+    }
+#else
+    result = hamming_distance_loop_byte(a, b, length);
 #endif
     return result;
 }
@@ -230,7 +303,7 @@ inline int check_hexstrings_within_dist(
  *                  - `string2` -- hex string
  * @returns         the integer hamming distance between the binary
  */
-static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
+static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args) {
     char *input_s1;
     char *input_s2;
 
@@ -254,6 +327,7 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
     size_t input_s1_len = strlen(input_s1);
     size_t input_s2_len = strlen(input_s2);
 
+    // if the two strings are not the same length, can't move on, so raise
     if (input_s1_len != input_s2_len) {
         PyErr_SetString(PyExc_ValueError, "strings are NOT the same length");
         return NULL;
@@ -261,10 +335,62 @@ static PyObject * hamming_distance_wrapper(PyObject *self, PyObject *args) {
 
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
-    int dist = hamming_distance(input_s1, input_s2, input_s1_len);
+    int dist = hamming_distance_string(input_s1, input_s2, input_s1_len);
     if (dist == -1) {
       // this should only happen if the strings contain
       // invalid hexadecimal characters
+      PyErr_SetString(PyExc_ValueError, "hex string contains invalid char");
+      return NULL;
+    } else {
+      // put the unsigned int into a Python Int object
+      // and return back to the caller!
+      return Py_BuildValue("I", dist);
+    }
+}
+
+/**
+ * Python interface for `hamming_distance`
+ *
+ * @param self      Python `self` object
+ * @param args      Python arguments for `hamming_distance` interface
+ *                  - `string1` -- hex string
+ *                  - `string2` -- hex string
+ * @returns         the integer hamming distance between the binary
+ */
+static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) {
+    char *input_s1;
+    char *input_s2;
+    size_t input_s1_len;
+    size_t input_s2_len;
+
+    // get the two strings from `args`
+    // if they are incorrect types (i.e., not 's'), this will raise
+    // a ValueError
+    if (!PyArg_ParseTuple(args, "s#s#", &input_s1, &input_s1_len, &input_s2, &input_s2_len)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "error occurred while parsing arguments"
+        );
+        return NULL;
+    }
+
+    // if either c-string is NULL, can't move on, so raise
+    if (input_s1 == NULL || input_s2 == NULL) {
+        PyErr_SetString(PyExc_ValueError, "one or no strings provided!");
+        return NULL;
+    }
+
+    // if the two strings are not the same length, can't move on, so raise
+    if (input_s1_len != input_s2_len) {
+        PyErr_SetString(PyExc_ValueError, "bytes are NOT the same length");
+        return NULL;
+    }
+
+    // at this point, we can safely proceed with
+    // our `hamming_distance` computation
+    int dist = hamming_distance_byte(input_s1, input_s2, input_s1_len);
+    if (dist == -1) {
+      // this really shouldn't happen with bytes, but just in case
       PyErr_SetString(PyExc_ValueError, "hex string contains invalid char");
       return NULL;
     } else {
@@ -345,7 +471,7 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
 ///////////////////////////////////////////////////////////////
 // Docstrings
 ///////////////////////////////////////////////////////////////
-static char hamming_docstring[] =
+static char hamming_string_docstring[] =
     "Calculate the hamming distance of two strings\n\n"
     "This is equivalent to\n\n"
     "    bin(int(a, 16) ^ int(b, 16)).count('1')\n\n"
@@ -355,6 +481,19 @@ static char hamming_docstring[] =
     ":type a: str\n"
     ":param b: hexadecimal string\n"
     ":type b: str\n"
+    ":returns: the hamming distance between the bits of two hexadecimal strings\n"
+    ":rtype: int\n"
+    ":raises ValueError: if either string doesn't exist, "
+    "if the strings are different lengths, or if the strings aren't valid hex";
+
+static char hamming_byte_docstring[] =
+    "Calculate the hamming distance of two byte strings\n\n"
+    "with the only difference being it was written in C and optimized\n"
+    "using a lookup table of pre-calculated hexadecimal hamming distances.\n"
+    ":param a: hexadecimal string\n"
+    ":type a: byte\n"
+    ":param b: hexadecimal string\n"
+    ":type b: byte\n"
     ":returns: the hamming distance between the bits of two hexadecimal strings\n"
     ":rtype: int\n"
     ":raises ValueError: if either string doesn't exist, "
@@ -384,7 +523,8 @@ static char CompareDocstring[] =
 // Python C-extension Initialization
 ///////////////////////////////////////////////////////////////
 static PyMethodDef CompareMethods[] = {
-    {"hamming_distance", hamming_distance_wrapper, METH_VARARGS, hamming_docstring},
+    {"hamming_distance_string", hamming_distance_string_wrapper, METH_VARARGS, hamming_string_docstring},
+    {"hamming_distance_bytes", hamming_distance_byte_wrapper, METH_VARARGS, hamming_byte_docstring},
     {"check_hexstrings_within_dist", check_hexstrings_within_dist_wrapper, METH_VARARGS, check_hexstrings_within_dist_docstring},
     {NULL, NULL, 0, NULL}
 };

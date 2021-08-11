@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import pytest
-from hexhamming import check_hexstrings_within_dist, hamming_distance
+from hexhamming import check_hexstrings_within_dist, hamming_distance_string, hamming_distance_bytes
 
 ############################
 # hamming_distance tests
@@ -20,9 +20,49 @@ from hexhamming import check_hexstrings_within_dist, hamming_distance
         ("f" * 10000, "0" * 10000, 40000),
         ("f" * 10000, "f" * 10000, 0),
     ),
+    ids=(
+        "3-same",
+        "3-diff",
+        "6-different",
+        "empty-empty",
+        "64-f-0",
+        "64-f-f",
+        "64-0-0",
+        "10000-f-0",
+        "10000-f-f",
+    ),
 )
-def test_hamming_distance(hex1, hex2, expected):
-    assert hamming_distance(hex1, hex2) == expected
+def test_hamming_distance_string(hex1, hex2, expected):
+    assert hamming_distance_string(hex1, hex2) == expected
+
+
+@pytest.mark.parametrize(
+    "hex1,hex2,expected",
+    (
+        (b"\xab\x0c", b"\xab\x0c", 0),
+        (b"\x00", b"\x01", 1),
+        (b"\xAB\xCD\xEF", b"\x00\x00\x01", 16),
+        (b"", b"", 0),
+        (b"\xff" * 32, b"\x00" * 32, 256),
+        (b"\xff" * 32, b"\xff" * 32, 0),
+        (b"\x00" * 32, b"\x00" * 32, 0),
+        (b"\xff" * 5000, b"\x00" * 5000, 40000),
+        (b"\xff" * 5000, b"\xff" * 5000, 0),
+    ),
+    ids=(
+        "4-same",
+        "2-diff",
+        "6-different",
+        "empty-empty",
+        "64-f-0",
+        "64-f-f",
+        "64-0-0",
+        "10000-f-0",
+        "10000-f-f",
+    ),
+)
+def test_hamming_distance_byte(hex1, hex2, expected):
+    assert hamming_distance_bytes(hex1, hex2) == expected
 
 
 @pytest.mark.parametrize(
@@ -43,9 +83,9 @@ def test_hamming_distance(hex1, hex2, expected):
         ),
     ),
 )
-def test_hamming_distance_errors(hex1, hex2, exception, msg):
+def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     with pytest.raises(exception) as excinfo:
-        _ = hamming_distance(hex1, hex2)
+        _ = hamming_distance_string(hex1, hex2)
     assert msg in str(excinfo.value)
 
 
@@ -91,7 +131,7 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
     assert msg in str(excinfo.value)
 
 
-@pytest.mark.benchmark(group="hamming_distance")
+@pytest.mark.benchmark(group="hamming_distance_string")
 @pytest.mark.parametrize(
     ("hex1", "hex2"),
     (
@@ -113,8 +153,34 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
         "64-diff",
     ),
 )
-def test_hamming_distance_bench(benchmark, hex1, hex2):
-    benchmark(hamming_distance, hex1, hex2)
+def test_hamming_distance_string_bench(benchmark, hex1, hex2):
+    benchmark(hamming_distance_string, hex1, hex2)
+
+
+@pytest.mark.benchmark(group="hamming_distance_bytes")
+@pytest.mark.parametrize(
+    ("hex1", "hex2"),
+    (
+        (b"\xAB\x0C", b"\xDE\x0F"),
+        (b"\xBB\x0B", b"\xBB\x0B"),
+        (b"\xBB" * 500, b"\xBB" * 500),
+        (b"\xFF" * 500, b"\x00" * 500),
+        (b"\xBB" * 512, b"\xBB" * 512),
+        (b"\xFF" * 512, b"\x00" * 512),
+        (b"\xFF" * 32, b"\x00" * 32),
+    ),
+    ids=(
+        "3-diff",
+        "3-same",
+        "1000-same",
+        "1000-diff",
+        "1024-same",
+        "1024-diff",
+        "64-diff",
+    ),
+)
+def test_hamming_distance_bytes_bench(benchmark, hex1, hex2):
+    benchmark(hamming_distance_bytes, hex1, hex2)
 
 
 def test_check_hexstrings_within_dist_bench(benchmark):
