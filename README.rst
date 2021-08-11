@@ -96,7 +96,7 @@ and make sure the tests pass with
 
 ::
 
-    pytest -vls
+    python -m pytest -vls .
 
 Example
 -------
@@ -105,8 +105,17 @@ Using ``hexhamming`` is as simple as
 
 ::
 
-    >>> from hexhamming import hamming_distance
-    >>> hamming_distance("deadbeef", "00000000")
+    >>> from hexhamming import hamming_distance_string
+    >>> hamming_distance_string("deadbeef", "00000000")
+    24
+
+**New in v2.0.0** : ``hexhamming`` now supports `byte`s via ``hamming_distance_bytes``.
+You use it in the exact same way as before, except you pass in a byte string.
+
+::
+
+    >>> from hexhamming import hamming_distance_bytes
+    >>> hamming_distance_bytes(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00")
     24
 
 Benchmark
