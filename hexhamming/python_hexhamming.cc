@@ -60,6 +60,21 @@ inline int hamming_distance_loop_byte(const char* a, const char* b, size_t strin
     return result;
 }
 
+inline int hamming_distance_loop_byte_max_dist(const char* a, const char* b, size_t length, ssize_t max_dist) {
+    ssize_t difference = 0;
+    for (size_t i = 0; i < length; ++i) {
+#if _MSC_VER
+        difference += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
+#else
+        difference += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
+#endif
+        if (difference > max_dist) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 #if __SSE4_1__
 /**
  * SSE4.1 implementation of bitwise hamming distance of hex strings
@@ -162,6 +177,21 @@ static inline int hamming_distance_sse41_byte(const char* a, const char* b, size
         result += popcnt128(xor_result);
     }
     return result;
+}
+
+static inline int hamming_distance_sse41_byte_max_dist(const char* a, const char* b, size_t length, ssize_t max_dist) {
+    ssize_t difference = 0;
+    __m128i xor_result;
+    for (size_t i = 0; i < length; i += 16) {
+        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
+        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
+        xor_result = _mm_xor_si128(a16, b16);
+        difference += popcnt128(xor_result);
+        if (difference > max_dist) {
+            return 0;
+        }
+    }
+    return 1;
 }
 #endif
 
@@ -468,6 +498,66 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
     }
 }
 
+/**
+ * Python interface for `check_bytes_arrays_within_dist`
+ *
+ * @param self      Python `self` object
+ * @param args      Python arguments for `check_bytes_arrays_within_dist` interface
+ *                  - `array_of_elems` - bytes
+ *                  - `elem_to_compare` - bytes
+ *                  - `max_dist` - int
+ * @returns         index of element in array_of_elems or -1.
+ */
+static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args) {
+    char *big_array, *small_array;
+    size_t big_array_size, small_array_size;
+    ssize_t max_dist;
+
+    if (!PyArg_ParseTuple(args, "s#s#n", &big_array, &big_array_size, &small_array, &small_array_size, &max_dist)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "error occurred while parsing arguments"
+        );
+        return NULL;
+    }
+
+    if (small_array_size == 0) {
+        PyErr_SetString(PyExc_ValueError, "`elem_to_compare` size must be >0");
+        return NULL;
+    }
+
+    if (max_dist < 0) {
+        PyErr_SetString(PyExc_ValueError, "`max_dist` must be >=0");
+        return NULL;
+    }
+
+    if (small_array_size % 16 != 0) {
+        PyErr_SetString(PyExc_ValueError, "`elem_to_compare` size must be multiplier of 16");
+        return NULL;
+    }
+
+    if (big_array_size % small_array_size != 0) {
+        PyErr_SetString(PyExc_ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`");
+        return NULL;
+    }
+
+    int res;
+    int number_of_elements = big_array_size / small_array_size;
+    char* pBig = big_array;
+    for (int i = 0; i < number_of_elements; i++, pBig += small_array_size)
+    {
+#if __SSE4_1__
+        res = hamming_distance_sse41_byte_max_dist(pBig, small_array, small_array_size, max_dist);
+#else
+        res = hamming_distance_loop_byte_max_dist(pBig, small_array, small_array_size, max_dist);
+#endif
+        if (res == 1) {
+            return Py_BuildValue("i", i);
+        }
+    }
+    return Py_BuildValue("i", -1);
+}
+
 ///////////////////////////////////////////////////////////////
 // Docstrings
 ///////////////////////////////////////////////////////////////
@@ -516,6 +606,21 @@ static char check_hexstrings_within_dist_docstring[] =
     ":raises ValueError: if either string doesn't exist, "
     "if the strings are different lengths, or if the strings aren't valid hex";
 
+static char check_bytes_arrays_within_dist_docstring[] =
+    "Check if any element of byte array are within a specified Hamming Distance\n"
+    "and return it's index or -1 otherwise.\n\n"
+    "Size in bytes of `array_of_elems` and `elem_to_compare` must be multiple of 16.\n"
+    "Size of `elem_to_compare ` must be multiplier of `array_of_elems` size. \n\n"
+    ":param array_of_elems: array of bytes to search within\n"
+    ":type array_of_elems: bytes\n"
+    ":param elem_to_compare: will compare to each element in array_of_elems\n"
+    ":type elem_to_compare: bytes\n"
+    ":param max_dist: maximum allowable Hamming Distance\n"
+    ":type max_dist: int\n"
+    ":returns: index of first element in array_of_elems for which hamming distance <= `max_dist` or -1. \n"
+    ":rtype: int\n"
+    ":raises ValueError or native exception: if input parameters are invalid, internal exception will occur. Use wisely!";
+
 static char CompareDocstring[] =
     "Module for calculating hamming distance of two hexadecimal strings";
 
@@ -526,6 +631,7 @@ static PyMethodDef CompareMethods[] = {
     {"hamming_distance_string", hamming_distance_string_wrapper, METH_VARARGS, hamming_string_docstring},
     {"hamming_distance_bytes", hamming_distance_byte_wrapper, METH_VARARGS, hamming_byte_docstring},
     {"check_hexstrings_within_dist", check_hexstrings_within_dist_wrapper, METH_VARARGS, check_hexstrings_within_dist_docstring},
+    {"check_bytes_arrays_within_dist", check_bytes_arrays_within_dist, METH_VARARGS, check_bytes_arrays_within_dist_docstring},
     {NULL, NULL, 0, NULL}
 };
 
@@ -558,7 +664,7 @@ inithexhamming(void)
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "1.4.0")) {
+    if (PyModule_AddStringConstant(module, "__version__", "2.1.0")) {
         Py_XDECREF(module);
         INITERROR;
     }

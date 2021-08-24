@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import pytest
 from hexhamming import check_hexstrings_within_dist, hamming_distance_string, hamming_distance_bytes
+from hexhamming import check_bytes_arrays_within_dist
 
 ############################
 # hamming_distance tests
@@ -131,6 +132,65 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
     assert msg in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,exception,msg",
+    (
+        (
+            b"\x00" * 16,
+            b"\x00" * 16,
+            None,
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
+        (
+            b"\x00" * 16,
+            b"\x00" * 16,
+            "HELLO",
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
+        (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
+        (b"\x00" * 32, b"\x00" * 15, 3, ValueError, "`elem_to_compare` size must be multiplier of 16"),
+        (b"\x00" * 31, b"\x00" * 16, 3, ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`"),
+        (b"\x00" * 32, b"", 3, ValueError, "`elem_to_compare` size must be >0"),
+    ),
+)
+def test_check_bytes_arrays_within_dist_invalid_values(bytes1, bytes2, max_dist, exception, msg):
+    with pytest.raises(exception) as excinfo:
+        _ = check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
+    assert msg in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,expected",
+    (
+        (
+            b"\x00" * 16,
+            b"\xFF" * 16,
+            50, -1,
+        ),
+        (
+            b"\x00" * 16,
+            b"\x00" * 15 + b"\x0F" * 1,
+            4, 0,
+        ),
+        (
+            b"\xFF" * 16 * 8 + b"\x0F" * 16,
+            b"\x00" * 2 + b"\x0F" * 14,
+            8, 8,
+        ),
+        (
+            b"\xF0" * 64 + b"\x0A" * 64,
+            b"\x0F" * 64,
+            3 * 64, 1,
+        )
+    ),
+)
+def test_check_bytes_arrays_within_dist_calculation(bytes1, bytes2, max_dist, expected):
+    _ = check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
+    assert _ == expected
+
+
 @pytest.mark.benchmark(group="hamming_distance_string")
 @pytest.mark.parametrize(
     ("hex1", "hex2"),
@@ -185,3 +245,43 @@ def test_hamming_distance_bytes_bench(benchmark, hex1, hex2):
 
 def test_check_hexstrings_within_dist_bench(benchmark):
     benchmark(check_hexstrings_within_dist, "F" * 1000, "0" * 1000, 20)
+
+
+@pytest.mark.benchmark(group="hamming_distance_bytes_arrays_within_dist")
+@pytest.mark.parametrize(
+    ("bytes1", "bytes2", "max_dist", "result"),
+    (
+        (b"\x00" * 16 + b"\x00\x03" * 8 * 511,
+         b"\x00" * 16, 1, 0),
+        (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255,
+         b"\x00" * 16, 1, 256),
+        (b"\x00\x03" * 8 * 511 + b"\x00" * 16,
+         b"\x00" * 16, 1, 511),
+        (b"\xFF" * 32 + b"\x11" * 32 * 1023,
+         b"\xFB" * 32, 4*32, 0),
+        (b"\x11" * 32 * 511 + b"\xFF" * 32 + b"\x11" * 32 * 512,
+         b"\xFB" * 32, 4*32, 511),
+        (b"\x11" * 32 * 1023 + b"\xFF" * 32,
+         b"\xFB" * 32, 4*32, 1023),
+        (b"\xCC" * 64 + b"\x01" * 64 * 16383,
+         b"\xFB" * 64, 5*64, 0),
+        (b"\x01" * 64 * 8191 + b"\xCC" * 64 + b"\x01" * 64 * 8192,
+         b"\xFB" * 64, 5*64, 8191),
+        (b"\x01" * 64 * 16383 + b"\xCC" * 64,
+         b"\xFB" * 64, 5*64, 16383),
+    ),
+    ids=(
+        "  512 elems,s=16,at 0",
+        "  512 elems,s=16,mid",
+        "  512 elems,s=16,end",
+        " 1024 elems,s=32,at 0",
+        " 1024 elems,s=32,mid",
+        " 1024 elems,s=32,end",
+        "16384 elems,s=64,at 0",
+        "16384 elems,s=64,mid",
+        "16384 elems,s=64,end",
+    ),
+)
+def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist, result):
+    result = benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
+    assert result == result
