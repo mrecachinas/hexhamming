@@ -249,26 +249,26 @@ def test_check_hexstrings_within_dist_bench(benchmark):
 
 @pytest.mark.benchmark(group="hamming_distance_bytes_arrays_within_dist")
 @pytest.mark.parametrize(
-    ("bytes1", "bytes2", "max_dist", "result"),
+    ("bytes1", "bytes2", "max_dist"),
     (
         (b"\x00" * 16 + b"\x00\x03" * 8 * 511,
-         b"\x00" * 16, 1, 0),
+         b"\x00" * 16, 1),
         (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255,
-         b"\x00" * 16, 1, 256),
+         b"\x00" * 16, 1),
         (b"\x00\x03" * 8 * 511 + b"\x00" * 16,
-         b"\x00" * 16, 1, 511),
+         b"\x00" * 16, 1),
         (b"\xFF" * 32 + b"\x11" * 32 * 1023,
-         b"\xFB" * 32, 4*32, 0),
+         b"\xFB" * 32, 4*32),
         (b"\x11" * 32 * 511 + b"\xFF" * 32 + b"\x11" * 32 * 512,
-         b"\xFB" * 32, 4*32, 511),
+         b"\xFB" * 32, 4*32),
         (b"\x11" * 32 * 1023 + b"\xFF" * 32,
-         b"\xFB" * 32, 4*32, 1023),
+         b"\xFB" * 32, 4*32),
         (b"\xCC" * 64 + b"\x01" * 64 * 16383,
-         b"\xFB" * 64, 5*64, 0),
+         b"\xFB" * 64, 5*64),
         (b"\x01" * 64 * 8191 + b"\xCC" * 64 + b"\x01" * 64 * 8192,
-         b"\xFB" * 64, 5*64, 8191),
+         b"\xFB" * 64, 5*64),
         (b"\x01" * 64 * 16383 + b"\xCC" * 64,
-         b"\xFB" * 64, 5*64, 16383),
+         b"\xFB" * 64, 5*64),
     ),
     ids=(
         "  512 elems,s=16,at 0",
@@ -282,6 +282,6 @@ def test_check_hexstrings_within_dist_bench(benchmark):
         "16384 elems,s=64,end",
     ),
 )
-def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist, result):
-    result = benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
-    assert result == result
+def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
+    benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
+
