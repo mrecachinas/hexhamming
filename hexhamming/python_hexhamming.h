@@ -62,7 +62,7 @@
             flags |= bit_POPCNT;
         if ((cpu_flags[2] & bit_SSE41) == bit_SSE41)
             flags |= bit_SSE41;
-        if ((cpu_flags[2] & (1 << 27)) != (1 << 27)) // ensure OS supports extended processor state management
+        if ((cpu_flags[2] & (1 << 27)) != (1 << 27)) //check if processor state management supported
             return flags;
         int xcr0;
         #if defined(_MSC_VER)
@@ -94,38 +94,37 @@
     #define HAVE_ASM_POPCNT
 #endif
 
-#if defined(CPU_X86_64) && (defined(HAVE_ASM_POPCNT) || defined(_MSC_VER))
-    #define HAVE_POPCNT
-#endif
-
-
 #if defined(HAVE_ASM_POPCNT)
-    static inline uint64_t popcnt64(uint64_t x)
+    #define NATIVE_POPCNT
+    static inline size_t native_popcnt64(size_t x)
     {
         __asm__ ("popcnt %1, %0" : "=r" (x) : "0" (x));
         return x;
     }
 #elif defined(_MSC_VER)
+    #define NATIVE_POPCNT
     #include <nmmintrin.h>
-    static inline uint64_t popcnt64(uint64_t x)
+    static inline size_t native_popcnt64(size_t x)
     {
         return _mm_popcnt_u64(x);
     }
-#elif defined(HAVE_BUILTIN_POPCOUNT) /* non x86 */
-    static inline uint64_t popcnt64(uint64_t x)
+#elif defined(HAVE_BUILTIN_POPCOUNT)
+    #define NATIVE_POPCNT
+    static inline size_t native_popcnt64(size_t x)
     {
         return __builtin_popcountll(x);
     }
-#else /* no hardware POPCNT, use http://en.wikipedia.org/wiki/Hamming_weight#Efficient_implementation */
-    static inline uint64_t popcnt64(uint64_t x)
-    {
-        uint64_t m1 = 0x5555555555555555ll;
-        uint64_t m2 = 0x3333333333333333ll;
-        uint64_t m4 = 0x0F0F0F0F0F0F0F0Fll;
-        uint64_t h01 = 0x0101010101010101ll;
-        x -= (x >> 1) & m1;
-        x = (x & m2) + ((x >> 2) & m2);
-        x = (x + (x >> 4)) & m4;
-        return (x * h01) >> 56;
-    }
 #endif
+
+static inline size_t classic_popcnt64(size_t x)
+{
+    //http://en.wikipedia.org/wiki/Hamming_weight#Efficient_implementation
+    size_t m1 = 0x5555555555555555ll;
+    size_t m2 = 0x3333333333333333ll;
+    size_t m4 = 0x0F0F0F0F0F0F0F0Fll;
+    size_t h01 = 0x0101010101010101ll;
+    x -= (x >> 1) & m1;
+    x = (x & m2) + ((x >> 2) & m2);
+    x = (x + (x >> 4)) & m4;
+    return (x * h01) >> 56;
+}
