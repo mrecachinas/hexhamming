@@ -595,12 +595,12 @@ inithexhamming(void)
         if ((cpu_capabilities & bit_AVX2) == bit_AVX2) {
             IsExtraAvailable = 1;
         }
-        else if ((cpu_capabilities & bit_POPCNT) == bit_POPCNT) {
+        if ((cpu_capabilities & bit_POPCNT) == bit_POPCNT) {
             IsPopcountAvailable = 1;
         }
      #else
         #if defined(HAVE_NATIVE_POPCNT)
-            IsPopcountAvailable = 10;
+            IsPopcountAvailable = 1;
         #endif
      #endif
 #if PY_MAJOR_VERSION >= 3
