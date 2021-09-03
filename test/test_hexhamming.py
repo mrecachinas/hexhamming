@@ -150,7 +150,6 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
             "error occurred while parsing arguments",
         ),
         (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
-        (b"\x00" * 32, b"\x00" * 15, 3, ValueError, "`elem_to_compare` size must be multiplier of 16"),
         (b"\x00" * 31, b"\x00" * 16, 3, ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`"),
         (b"\x00" * 32, b"", 3, ValueError, "`elem_to_compare` size must be >0"),
     ),

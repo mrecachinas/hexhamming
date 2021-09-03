@@ -118,6 +118,7 @@
 #else //non x86_64 CPU
     #if (defined(__ARM_NEON) || defined(__aarch64__))
         #define ARM_EXTRA
+        #include <arm_neon.h>
     #endif
 #endif
 
@@ -180,7 +181,7 @@ static inline int sse_popcnt128(__m128i n) {
     return _mm_cvtsi128_si32(cnt128);
 }
 
-static inline int hamming_distance_bytes__basic(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     size_t difference = 0;
     size_t i = 0;
     __m128i xor_result;
@@ -220,7 +221,7 @@ static inline int hamming_distance_bytes__basic(const char* a, const char* b, si
     }
 }
 #else
-static inline int hamming_distance_bytes__basic(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     size_t difference = 0;
     size_t i = 0;
     if (max_dist < 0)
@@ -254,7 +255,7 @@ static inline int hamming_distance_bytes__basic(const char* a, const char* b, si
 
     /* Tier2(native) Functions. When AVX/Neon better is not available. */
 #ifdef HAVE_NATIVE_POPCNT
-static inline int hamming_distance_bytes__native(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__native(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     size_t difference = 0;
     size_t i = 0;
     if (max_dist < 0)
@@ -285,7 +286,7 @@ static inline int hamming_distance_bytes__native(const char* a, const char* b, s
     }
 }
 #else
-static inline int hamming_distance_bytes__native(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__native(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     // We will never call this func. We check if CPU doesn't support popcount, then using Tier3 functions.
     return -1;
 }
@@ -322,7 +323,7 @@ static inline int avx2_popcnt256(__m256i v) {
 #if !defined(_MSC_VER)
     __attribute__ ((target ("avx2")))
 #endif
-static inline int hamming_distance_bytes__extra(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     size_t difference = 0;
     size_t i = 0;
     __m256i xor_result;
@@ -362,12 +363,15 @@ static inline int hamming_distance_bytes__extra(const char* a, const char* b, si
     }
 }
 #elif defined(ARM_EXTRA)
-static inline int hamming_distance_bytes__extra(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline uint64x2_t vpadalq(uint64x2_t sum, uint8x16_t t) {
+    return vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t)));
+}
+static inline int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     // TODO.
     return -1;
 }
 #else
-static inline int hamming_distance_bytes__extra(const char* a, const char* b, size_t length, ssize_t max_dist) {
+static inline int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     // We will never call this func. We check if CPU doesn't support AVX/Neon, then using Tier2(3) functions.
     return -1;
 }

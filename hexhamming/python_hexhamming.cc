@@ -182,8 +182,8 @@ inline int hamming_distance_string(
  * @return      the number of bits different between the hexadecimal strings
  */
 inline int hamming_distance_byte(
-    const char* a,
-    const char* b,
+    const uint8_t* a,
+    const uint8_t* b,
     size_t length
 ) {
     int result;
@@ -314,8 +314,8 @@ static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args
  * @returns         the integer hamming distance between the binary
  */
 static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) {
-    char *input_s1;
-    char *input_s2;
+    uint8_t *input_s1;
+    uint8_t *input_s2;
     size_t input_s1_len;
     size_t input_s2_len;
 
@@ -435,7 +435,7 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
  * @returns         index of element in array_of_elems or -1.
  */
 static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args) {
-    char *big_array, *small_array;
+    uint8_t *big_array, *small_array;
     size_t big_array_size, small_array_size;
     ssize_t max_dist;
 
@@ -464,7 +464,7 @@ static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args)
 
     int res;
     int number_of_elements = big_array_size / small_array_size;
-    char* pBig = big_array;
+    uint8_t* pBig = big_array;
 
     if ((IsExtraAvailable != 0) && (small_array_size >= 64)) {
         for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
@@ -608,7 +608,7 @@ inithexhamming(void)
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "2.0.b")) {
+    if (PyModule_AddStringConstant(module, "__version__", "2.1.0")) {
         Py_XDECREF(module);
         INITERROR;
     }
