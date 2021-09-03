@@ -6,23 +6,22 @@
 #endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "python_hexhamming.h"
 
 ///////////////////////////////////////////////////////////////
 // C API
 ///////////////////////////////////////////////////////////////
+
+//Pointers to functions. Will be inited in PyMODINIT_FUNC.
+static int  cpu_capabilities = 0;
+static int  IsExtraAvailable = 0;
+static int  IsPopcountAvailable = 0;
 
 /**
  * An array of size 16 containing the XOR result of
  * two numbers between 0 and 15 (i.e., '0' - 'F').
  */
 const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
-
-#if __SSE4_1__
-static inline int popcnt128(__m128i n) {
-    const __m128i n_hi = _mm_unpackhi_epi64(n, n);
-    return _mm_popcnt_u64(_mm_cvtsi128_si64(n)) + _mm_popcnt_u64(_mm_cvtsi128_si64(n_hi));
-}
-#endif
 
 inline int hamming_distance_loop_string(const char* a, const char* b, size_t string_length) {
     int result = 0;
@@ -48,34 +47,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, size_t str
     return result;
 }
 
-inline int hamming_distance_loop_byte(const char* a, const char* b, size_t string_length) {
-    int result = 0;
-    for (size_t i = 0; i < string_length; ++i) {
-#if _MSC_VER
-        result += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
-#else
-        result += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
-#endif
-    }
-    return result;
-}
-
-inline int hamming_distance_loop_byte_max_dist(const char* a, const char* b, size_t length, ssize_t max_dist) {
-    ssize_t difference = 0;
-    for (size_t i = 0; i < length; ++i) {
-#if _MSC_VER
-        difference += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
-#else
-        difference += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
-#endif
-        if (difference > max_dist) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-#if __SSE4_1__
+#ifdef CPU_X86_64
 /**
  * SSE4.1 implementation of bitwise hamming distance of hex strings
  *
@@ -155,43 +127,9 @@ static inline int hamming_distance_sse41_string(const char* a, const char* b, si
         xor_result = _mm_xor_si128(a_hex, b_hex);
 
         // Store the results
-        result += popcnt128(xor_result);
+        result += sse_popcnt128(xor_result);
     }
     return result;
-}
-
-static inline int hamming_distance_sse41_byte(const char* a, const char* b, size_t length) {
-    int result = 0;
-    int fifteen_less = length - 15;
-    
-    __m128i xor_result;
-    for (int i = 0; i < fifteen_less; i += 16) {
-        // load 16 chars from `a` and `b`
-        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
-        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
-
-        // Do the XOR
-        xor_result = _mm_xor_si128(a16, b16);
-
-        // Store the results
-        result += popcnt128(xor_result);
-    }
-    return result;
-}
-
-static inline int hamming_distance_sse41_byte_max_dist(const char* a, const char* b, size_t length, ssize_t max_dist) {
-    ssize_t difference = 0;
-    __m128i xor_result;
-    for (size_t i = 0; i < length; i += 16) {
-        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
-        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
-        xor_result = _mm_xor_si128(a16, b16);
-        difference += popcnt128(xor_result);
-        if (difference > max_dist) {
-            return 0;
-        }
-    }
-    return 1;
 }
 #endif
 
@@ -211,7 +149,7 @@ inline int hamming_distance_string(
 ) {
     int result;
 
-#if __SSE4_1__
+#ifdef CPU_X86_64
     result = hamming_distance_sse41_string(a, b, string_length);
     if (result == -1) {
         return result;
@@ -249,27 +187,15 @@ inline int hamming_distance_byte(
     size_t length
 ) {
     int result;
-
-#if __SSE4_1__
-    result = hamming_distance_sse41_byte(a, b, length);
-    if (result == -1) {
-        return result;
+    if ((IsExtraAvailable != 0) && (length >= 64)) {
+        result = hamming_distance_bytes__extra(a, b, length, -1);
     }
-    
-    char mod16 = length & 15;
-    if (mod16 != 0) {
-        int fifteen_less = length - mod16;
-        int start_index = fifteen_less >= 0 ? fifteen_less : 0;
-        int dist = hamming_distance_loop_byte(&a[start_index], &b[start_index], mod16);
-        if (dist == -1) {
-            return dist;
-        } else {
-            result += dist;
-        }
+    else if (IsPopcountAvailable != 0) {
+        result = hamming_distance_bytes__native(a, b, length, -1);
     }
-#else
-    result = hamming_distance_loop_byte(a, b, length);
-#endif
+    else {
+        result = hamming_distance_bytes__basic(a, b, length, -1);
+    }
     return result;
 }
 
@@ -531,11 +457,6 @@ static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    if (small_array_size % 16 != 0) {
-        PyErr_SetString(PyExc_ValueError, "`elem_to_compare` size must be multiplier of 16");
-        return NULL;
-    }
-
     if (big_array_size % small_array_size != 0) {
         PyErr_SetString(PyExc_ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`");
         return NULL;
@@ -544,15 +465,26 @@ static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args)
     int res;
     int number_of_elements = big_array_size / small_array_size;
     char* pBig = big_array;
-    for (int i = 0; i < number_of_elements; i++, pBig += small_array_size)
-    {
-#if __SSE4_1__
-        res = hamming_distance_sse41_byte_max_dist(pBig, small_array, small_array_size, max_dist);
-#else
-        res = hamming_distance_loop_byte_max_dist(pBig, small_array, small_array_size, max_dist);
-#endif
-        if (res == 1) {
-            return Py_BuildValue("i", i);
+
+    if ((IsExtraAvailable != 0) && (small_array_size >= 64)) {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__extra(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
+        }
+    }
+    else if (IsPopcountAvailable != 0) {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__native(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
+        }
+    }
+    else {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__basic(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
         }
     }
     return Py_BuildValue("i", -1);
@@ -609,7 +541,6 @@ static char check_hexstrings_within_dist_docstring[] =
 static char check_bytes_arrays_within_dist_docstring[] =
     "Check if any element of byte array are within a specified Hamming Distance\n"
     "and return it's index or -1 otherwise.\n\n"
-    "Size in bytes of `array_of_elems` and `elem_to_compare` must be multiple of 16.\n"
     "Size of `elem_to_compare ` must be multiplier of `array_of_elems` size. \n\n"
     ":param array_of_elems: array of bytes to search within\n"
     ":type array_of_elems: bytes\n"
@@ -619,7 +550,7 @@ static char check_bytes_arrays_within_dist_docstring[] =
     ":type max_dist: int\n"
     ":returns: index of first element in array_of_elems for which hamming distance <= `max_dist` or -1. \n"
     ":rtype: int\n"
-    ":raises ValueError or native exception: if input parameters are invalid, internal exception will occur. Use wisely!";
+    ":raises ValueError: if input parameters are invalid.";
 
 static char CompareDocstring[] =
     "Module for calculating hamming distance of two hexadecimal strings";
@@ -659,12 +590,25 @@ inithexhamming(void)
 #endif
 
 {
+     #if defined(CPU_X86_64)
+        cpu_capabilities = get_cpuid();
+        if ((cpu_capabilities & bit_AVX2) == bit_AVX2) {
+            IsExtraAvailable = 1;
+        }
+        else if ((cpu_capabilities & bit_POPCNT) == bit_POPCNT) {
+            IsPopcountAvailable = 1;
+        }
+     #else
+        #if defined(HAVE_NATIVE_POPCNT)
+            IsPopcountAvailable = 10;
+        #endif
+     #endif
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "2.1.0")) {
+    if (PyModule_AddStringConstant(module, "__version__", "2.0.b")) {
         Py_XDECREF(module);
         INITERROR;
     }
