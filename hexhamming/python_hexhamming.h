@@ -162,39 +162,51 @@ static inline size_t classic_popcnt64(size_t x) {
 #ifdef CPU_X86_64
 static const __m128i sse_popcount_mask = _mm_set1_epi8(0x0F);
 static const __m128i sse_popcount_table = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
-static inline __m128i sse_popcnt8(__m128i n) {
-    const __m128i pcnt0 = _mm_shuffle_epi8(sse_popcount_table, _mm_and_si128(n, sse_popcount_mask));
-    const __m128i pcnt1 = _mm_shuffle_epi8(sse_popcount_table, _mm_and_si128(_mm_srli_epi16(n, 4), sse_popcount_mask));
-    return _mm_add_epi8(pcnt0, pcnt1);
-}
-
-static inline __m128i sse_popcnt64(__m128i n) {
-    const __m128i cnt8 = sse_popcnt8(n);
-    return _mm_sad_epu8(cnt8, _mm_setzero_si128());
-}
 
 static inline int sse_popcnt128(__m128i n) {
     // "Wojciech Mula" SSE3 version
-    const __m128i cnt64 = sse_popcnt64(n);
+    const __m128i pcnt0 = _mm_shuffle_epi8(sse_popcount_table, _mm_and_si128(n, sse_popcount_mask));
+    const __m128i pcnt1 = _mm_shuffle_epi8(sse_popcount_table, _mm_and_si128(_mm_srli_epi16(n, 4), sse_popcount_mask));
+    const __m128i cnt8 = _mm_add_epi8(pcnt0, pcnt1);
+    const __m128i cnt64 = _mm_sad_epu8(cnt8, _mm_setzero_si128());
     const __m128i cnt64_hi = _mm_unpackhi_epi64(cnt64, cnt64);
     const __m128i cnt128 = _mm_add_epi32(cnt64, cnt64_hi);
     return _mm_cvtsi128_si32(cnt128);
 }
 
+#define SSE_ITERATION { \
+        const __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]); \
+        const __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]); \
+        const __m128i xor_result = _mm_xor_si128(a16, b16); \
+        const __m128i lo  = _mm_and_si128(xor_result, sse_popcount_mask); \
+        const __m128i hi  = _mm_and_si128(_mm_srli_epi16(xor_result, 4), sse_popcount_mask); \
+        const __m128i cnt_low = _mm_shuffle_epi8(sse_popcount_table, lo); \
+        const __m128i cnt_high = _mm_shuffle_epi8(sse_popcount_table, hi); \
+        local = _mm_add_epi8(local, cnt_low); \
+        local = _mm_add_epi8(local, cnt_high); \
+        i += 16; \
+    }
 static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
-    size_t difference = 0;
     size_t i = 0;
-    __m128i xor_result;
+    size_t difference = 0;
     if (max_dist < 0)
     {
         if (length > 16)
-            for (; i < length - length % 16; i += 16)
+        {
+            __m128i sse_difference = _mm_setzero_si128();
+            while (i + 16 * 4 <= length)
             {
-                __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
-                __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
-                xor_result = _mm_xor_si128(a16, b16);
-                difference += sse_popcnt128(xor_result);
+                __m128i local = _mm_setzero_si128();
+                SSE_ITERATION SSE_ITERATION SSE_ITERATION SSE_ITERATION
+                sse_difference = _mm_add_epi64(sse_difference, _mm_sad_epu8(local, _mm_setzero_si128()));
             }
+            __m128i local = _mm_setzero_si128();
+            while (i + 16 <= length)
+                SSE_ITERATION
+            sse_difference = _mm_add_epi64(sse_difference, _mm_sad_epu8(local, _mm_setzero_si128()));
+            difference = (uint64_t)(_mm_extract_epi64(sse_difference, 0));
+            difference += (uint64_t)(_mm_extract_epi64(sse_difference, 1));
+        }
         for (; i < length; i++)
             difference += classic_popcnt64(a[i] ^ b[i]);
         return difference;
@@ -204,9 +216,9 @@ static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t*
         if (length > 16)
             for (; i < length - length % 16; i += 16)
             {
-                __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
-                __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
-                xor_result = _mm_xor_si128(a16, b16);
+                const __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
+                const __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
+                const __m128i xor_result = _mm_xor_si128(a16, b16);
                 difference += sse_popcnt128(xor_result);
                 if (difference > (size_t)max_dist)
                     return 0;
@@ -220,6 +232,7 @@ static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t*
         return 1;
     }
 }
+#undef SSE_ITERATION
 #else
 static inline int hamming_distance_bytes__basic(const uint8_t* a, const uint8_t* b, size_t length, ssize_t max_dist) {
     size_t difference = 0;
