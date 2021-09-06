@@ -6,23 +6,22 @@
 #endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "python_hexhamming.h"
 
 ///////////////////////////////////////////////////////////////
 // C API
 ///////////////////////////////////////////////////////////////
+
+//Pointers to functions. Will be inited in PyMODINIT_FUNC.
+static int  cpu_capabilities = 0;
+static int  IsExtraAvailable = 0;
+static int  IsPopcountAvailable = 0;
 
 /**
  * An array of size 16 containing the XOR result of
  * two numbers between 0 and 15 (i.e., '0' - 'F').
  */
 const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
-
-#if __SSE4_1__
-static inline int popcnt128(__m128i n) {
-    const __m128i n_hi = _mm_unpackhi_epi64(n, n);
-    return _mm_popcnt_u64(_mm_cvtsi128_si64(n)) + _mm_popcnt_u64(_mm_cvtsi128_si64(n_hi));
-}
-#endif
 
 inline int hamming_distance_loop_string(const char* a, const char* b, size_t string_length) {
     int result = 0;
@@ -48,19 +47,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, size_t str
     return result;
 }
 
-inline int hamming_distance_loop_byte(const char* a, const char* b, size_t string_length) {
-    int result = 0;
-    for (size_t i = 0; i < string_length; ++i) {
-#if _MSC_VER
-        result += __popcnt16((unsigned char)a[i] ^ (unsigned char)b[i]);
-#else
-        result += __popcntd((unsigned char)a[i] ^ (unsigned char)b[i]);
-#endif
-    }
-    return result;
-}
-
-#if __SSE4_1__
+#ifdef CPU_X86_64
 /**
  * SSE4.1 implementation of bitwise hamming distance of hex strings
  *
@@ -140,26 +127,7 @@ static inline int hamming_distance_sse41_string(const char* a, const char* b, si
         xor_result = _mm_xor_si128(a_hex, b_hex);
 
         // Store the results
-        result += popcnt128(xor_result);
-    }
-    return result;
-}
-
-static inline int hamming_distance_sse41_byte(const char* a, const char* b, size_t length) {
-    int result = 0;
-    int fifteen_less = length - 15;
-    
-    __m128i xor_result;
-    for (int i = 0; i < fifteen_less; i += 16) {
-        // load 16 chars from `a` and `b`
-        __m128i a16 = _mm_loadu_si128((__m128i *)&a[i]);
-        __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
-
-        // Do the XOR
-        xor_result = _mm_xor_si128(a16, b16);
-
-        // Store the results
-        result += popcnt128(xor_result);
+        result += sse_popcnt128(xor_result);
     }
     return result;
 }
@@ -181,7 +149,7 @@ inline int hamming_distance_string(
 ) {
     int result;
 
-#if __SSE4_1__
+#ifdef CPU_X86_64
     result = hamming_distance_sse41_string(a, b, string_length);
     if (result == -1) {
         return result;
@@ -214,32 +182,20 @@ inline int hamming_distance_string(
  * @return      the number of bits different between the hexadecimal strings
  */
 inline int hamming_distance_byte(
-    const char* a,
-    const char* b,
+    const uint8_t* a,
+    const uint8_t* b,
     size_t length
 ) {
     int result;
-
-#if __SSE4_1__
-    result = hamming_distance_sse41_byte(a, b, length);
-    if (result == -1) {
-        return result;
+    if ((IsExtraAvailable != 0) && (length >= 64)) {
+        result = hamming_distance_bytes__extra(a, b, length, -1);
     }
-    
-    char mod16 = length & 15;
-    if (mod16 != 0) {
-        int fifteen_less = length - mod16;
-        int start_index = fifteen_less >= 0 ? fifteen_less : 0;
-        int dist = hamming_distance_loop_byte(&a[start_index], &b[start_index], mod16);
-        if (dist == -1) {
-            return dist;
-        } else {
-            result += dist;
-        }
+    else if (IsPopcountAvailable != 0) {
+        result = hamming_distance_bytes__native(a, b, length, -1);
     }
-#else
-    result = hamming_distance_loop_byte(a, b, length);
-#endif
+    else {
+        result = hamming_distance_bytes__basic(a, b, length, -1);
+    }
     return result;
 }
 
@@ -358,8 +314,8 @@ static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args
  * @returns         the integer hamming distance between the binary
  */
 static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) {
-    char *input_s1;
-    char *input_s2;
+    uint8_t *input_s1;
+    uint8_t *input_s2;
     size_t input_s1_len;
     size_t input_s2_len;
 
@@ -468,6 +424,72 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
     }
 }
 
+/**
+ * Python interface for `check_bytes_arrays_within_dist`
+ *
+ * @param self      Python `self` object
+ * @param args      Python arguments for `check_bytes_arrays_within_dist` interface
+ *                  - `array_of_elems` - bytes
+ *                  - `elem_to_compare` - bytes
+ *                  - `max_dist` - int
+ * @returns         index of element in array_of_elems or -1.
+ */
+static PyObject * check_bytes_arrays_within_dist(PyObject *self, PyObject *args) {
+    uint8_t *big_array, *small_array;
+    size_t big_array_size, small_array_size;
+    ssize_t max_dist;
+
+    if (!PyArg_ParseTuple(args, "s#s#n", &big_array, &big_array_size, &small_array, &small_array_size, &max_dist)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "error occurred while parsing arguments"
+        );
+        return NULL;
+    }
+
+    if (small_array_size == 0) {
+        PyErr_SetString(PyExc_ValueError, "`elem_to_compare` size must be >0");
+        return NULL;
+    }
+
+    if (max_dist < 0) {
+        PyErr_SetString(PyExc_ValueError, "`max_dist` must be >=0");
+        return NULL;
+    }
+
+    if (big_array_size % small_array_size != 0) {
+        PyErr_SetString(PyExc_ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`");
+        return NULL;
+    }
+
+    int res;
+    int number_of_elements = big_array_size / small_array_size;
+    uint8_t* pBig = big_array;
+
+    if ((IsExtraAvailable != 0) && (small_array_size >= 64)) {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__extra(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
+        }
+    }
+    else if (IsPopcountAvailable != 0) {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__native(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
+        }
+    }
+    else {
+        for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+            res = hamming_distance_bytes__basic(pBig, small_array, small_array_size, max_dist);
+            if (res == 1)
+                return Py_BuildValue("i", i);
+        }
+    }
+    return Py_BuildValue("i", -1);
+}
+
 ///////////////////////////////////////////////////////////////
 // Docstrings
 ///////////////////////////////////////////////////////////////
@@ -516,6 +538,20 @@ static char check_hexstrings_within_dist_docstring[] =
     ":raises ValueError: if either string doesn't exist, "
     "if the strings are different lengths, or if the strings aren't valid hex";
 
+static char check_bytes_arrays_within_dist_docstring[] =
+    "Check if any element of byte array are within a specified Hamming Distance\n"
+    "and return it's index or -1 otherwise.\n\n"
+    "Size of `elem_to_compare ` must be multiplier of `array_of_elems` size. \n\n"
+    ":param array_of_elems: array of bytes to search within\n"
+    ":type array_of_elems: bytes\n"
+    ":param elem_to_compare: will compare to each element in array_of_elems\n"
+    ":type elem_to_compare: bytes\n"
+    ":param max_dist: maximum allowable Hamming Distance\n"
+    ":type max_dist: int\n"
+    ":returns: index of first element in array_of_elems for which hamming distance <= `max_dist` or -1. \n"
+    ":rtype: int\n"
+    ":raises ValueError: if input parameters are invalid.";
+
 static char CompareDocstring[] =
     "Module for calculating hamming distance of two hexadecimal strings";
 
@@ -526,6 +562,7 @@ static PyMethodDef CompareMethods[] = {
     {"hamming_distance_string", hamming_distance_string_wrapper, METH_VARARGS, hamming_string_docstring},
     {"hamming_distance_bytes", hamming_distance_byte_wrapper, METH_VARARGS, hamming_byte_docstring},
     {"check_hexstrings_within_dist", check_hexstrings_within_dist_wrapper, METH_VARARGS, check_hexstrings_within_dist_docstring},
+    {"check_bytes_arrays_within_dist", check_bytes_arrays_within_dist, METH_VARARGS, check_bytes_arrays_within_dist_docstring},
     {NULL, NULL, 0, NULL}
 };
 
@@ -553,12 +590,25 @@ inithexhamming(void)
 #endif
 
 {
+     #if defined(CPU_X86_64)
+        cpu_capabilities = get_cpuid();
+        if ((cpu_capabilities & bit_AVX2) == bit_AVX2) {
+            IsExtraAvailable = 1;
+        }
+        if ((cpu_capabilities & bit_POPCNT) == bit_POPCNT) {
+            IsPopcountAvailable = 1;
+        }
+     #else
+        #if defined(HAVE_NATIVE_POPCNT)
+            IsPopcountAvailable = 1;
+        #endif
+     #endif
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "2.0.1")) {
+    if (PyModule_AddStringConstant(module, "__version__", "2.1.0")) {
         Py_XDECREF(module);
         INITERROR;
     }
