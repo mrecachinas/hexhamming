@@ -1,6 +1,12 @@
 #ifndef HEXHAMMING_H
 #define HEXHAMMING_H
 
+#if defined(_MSC_VER)
+#include <cstdint>
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+
 #ifndef __has_builtin
     #define __has_builtin(x) 0
 #endif
