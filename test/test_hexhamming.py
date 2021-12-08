@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import pytest
-from hexhamming import check_hexstrings_within_dist, hamming_distance_string, hamming_distance_bytes
-from hexhamming import check_bytes_arrays_within_dist
+from hexhamming import check_hexstrings_within_dist, hamming_distance_string, \
+                        hamming_distance_bytes, check_bytes_arrays_within_dist, set_algo
 
 ############################
 # hamming_distance tests
@@ -34,7 +34,9 @@ from hexhamming import check_bytes_arrays_within_dist
     ),
 )
 def test_hamming_distance_string(hex1, hex2, expected):
-    assert hamming_distance_string(hex1, hex2) == expected
+    assert expected == hamming_distance_string(hex1, hex2)
+    assert len(set_algo('classic')) == 0        # we have only 2 algorithms for strings currently.
+    assert expected == hamming_distance_string(hex1, hex2)
 
 
 @pytest.mark.parametrize(
@@ -63,7 +65,10 @@ def test_hamming_distance_string(hex1, hex2, expected):
     ),
 )
 def test_hamming_distance_byte(hex1, hex2, expected):
-    assert hamming_distance_bytes(hex1, hex2) == expected
+    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    for algorithm in algorithm_list:
+        assert len(set_algo(algorithm)) == 0
+        assert expected == hamming_distance_bytes(hex1, hex2)
 
 
 @pytest.mark.parametrize(
@@ -99,7 +104,10 @@ def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     ),
 )
 def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
-    assert check_hexstrings_within_dist(hex1, hex2, max_dist) == expected
+    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    for algorithm in algorithm_list:
+        assert len(set_algo(algorithm)) == 0
+        assert expected == check_hexstrings_within_dist(hex1, hex2, max_dist)
 
 
 @pytest.mark.parametrize(
@@ -186,8 +194,10 @@ def test_check_bytes_arrays_within_dist_invalid_values(bytes1, bytes2, max_dist,
     ),
 )
 def test_check_bytes_arrays_within_dist_calculation(bytes1, bytes2, max_dist, expected):
-    _ = check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
-    assert _ == expected
+    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    for algorithm in algorithm_list:
+        assert len(set_algo(algorithm)) == 0
+        assert expected == check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
 
 
 @pytest.mark.benchmark(group="hamming_distance_string")
@@ -283,4 +293,3 @@ def test_check_hexstrings_within_dist_bench(benchmark):
 )
 def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
     benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
-
