@@ -32,7 +32,7 @@ jobs:
     - name: 🛠 Build Hexhamming Python C extension
       run: python setup.py install
     - name: Test with pytest
-      run: pytest
+      run: pytest -s .
   build-wheels:
     needs: build-and-test
     if: startsWith(github.ref, 'refs/tags')
