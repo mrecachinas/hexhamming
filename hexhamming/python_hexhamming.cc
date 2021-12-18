@@ -16,8 +16,8 @@
 //Pointers to functions. Will be inited in PyMODINIT_FUNC by USE__* macros(can be found at end of header file).
 static int (*ptr__hamming_distance_bytes)(const uint8_t*, const uint8_t*, const size_t, const ssize_t);
 static int (*ptr__hamming_distance_string)(const char*, const char*, const size_t);
-//Bit mask off CPU capabilities.
-static int cpu_capabilities;
+static int cpu_capabilities;            //Bit mask off CPU capabilities.
+char cpu_not_support_msg[64];           //"CPU doesnt support this feature. %X" , cpu_capabilities
 
 
 /**
@@ -318,7 +318,7 @@ static PyObject * set_algo_wrapper(PyObject *self, PyObject *args) {
             USE__EXTRA
         }
         else
-            result = "CPU doesnt support this feature.";
+            result = cpu_not_support_msg;
     }
 #if defined(HAVE_NATIVE_POPCNT)
     else if (strcmp(algo_name, "native") == 0) {
@@ -326,7 +326,7 @@ static PyObject * set_algo_wrapper(PyObject *self, PyObject *args) {
             USE__NATIVE
         }
         else
-            result = "CPU doesnt support this feature.";
+            result = cpu_not_support_msg;
     }
 #endif
 #if defined(CPU_X86_64)
@@ -335,7 +335,7 @@ static PyObject * set_algo_wrapper(PyObject *self, PyObject *args) {
             USE__SSE41
         }
         else
-            result = "CPU doesnt support this feature.";
+            result = cpu_not_support_msg;
     }
 #endif
     else if (strcmp(algo_name, "classic") == 0) {
@@ -478,6 +478,7 @@ inithexhamming(void)
             USE__CLASSIC
         #endif
      #endif
+     snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature. %X", cpu_capabilities);
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
