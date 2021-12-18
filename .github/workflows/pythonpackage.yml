@@ -2,6 +2,7 @@ name: build
 
 on:
   push:
+    branches: [ master ]
     paths:
       - test/test_hexhamming.py
       - setup.py
@@ -9,6 +10,8 @@ on:
       - pytest.ini
       - requirements-dev.txt
       - .github/workflows/pythonpackage.yml
+  pull_request:
+    branches: [ master ]
 
 jobs:
   build-and-test:
