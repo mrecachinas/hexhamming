@@ -3,13 +3,8 @@ name: build
 on:
   push:
     branches: [ master ]
-    paths:
-      - test/test_hexhamming.py
-      - setup.py
-      - hexhamming/python_hexhamming.cc
-      - pytest.ini
-      - requirements-dev.txt
-      - .github/workflows/pythonpackage.yml
+    tags:        
+      - '*'
   pull_request:
     branches: [ master ]
 
