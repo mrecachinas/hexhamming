@@ -135,12 +135,12 @@ typedef SSIZE_T ssize_t;
 
 /*------- arm7 or kvm64 -------*/
             /* BYTES */
-static inline size_t popcnt64__classic(size_t x) {
+static inline uint64_t popcnt64__classic(uint64_t x) {
     //http://en.wikipedia.org/wiki/Hamming_weight#Efficient_implementation
-    size_t m1 = 0x5555555555555555ll;
-    size_t m2 = 0x3333333333333333ll;
-    size_t m4 = 0x0F0F0F0F0F0F0F0Fll;
-    size_t h01 = 0x0101010101010101ll;
+    uint64_t m1 = 0x5555555555555555ll;
+    uint64_t m2 = 0x3333333333333333ll;
+    uint64_t m4 = 0x0F0F0F0F0F0F0F0Fll;
+    uint64_t h01 = 0x0101010101010101ll;
     x -= (x >> 1) & m1;
     x = (x & m2) + ((x >> 2) & m2);
     x = (x + (x >> 4)) & m4;
@@ -185,6 +185,15 @@ static int hamming_distance_bytes__classic(const uint8_t* a, const uint8_t* b, c
  */
 static const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
 
+/**
+ * Returns the hamming distance of the binary between two hexadecimal strings
+ * of the same length.
+ *
+ * @param a    hexadecimal char array
+ * @param b    hexadecimal char array
+ * @param string_length length of `a` and `b`
+ * @return      the number of bits different between the hexadecimal strings
+ */
 inline int hamming_distance_loop_string(const char* a, const char* b, const size_t string_length) {
     int result = 0;
     int val1, val2;
@@ -208,20 +217,6 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
     }
     return result;
 }
-
-/**
- * Returns the hamming distance of the binary between two hexadecimal strings
- * of the same length.
- *
- * @param a    hexadecimal char array
- * @param b    hexadecimal char array
- * @param string_length length of `a` and `b`
- * @return      the number of bits different between the hexadecimal strings
- */
-static int hamming_distance_string__classic(const char* a, const char* b, const size_t string_length) {
-    return hamming_distance_loop_string(a, b, string_length);
-}
-
 
 
 /*------- SSE4.1 -------*/
@@ -412,16 +407,22 @@ static int hamming_distance_string__classic(const char* a, const char* b, const 
 
 
 /*------- Native popcnt64 -------*/
-#if defined(CPU_X86_64) && defined(_MSC_VER)
+#if defined(CPU_X86_64) && (GNUC_PREREQ(4, 2) || CLANG_PREREQ(3, 0))
+    #define HAVE_NATIVE_POPCNT
+     static inline uint64_t popcnt64__native(uint64_t x) {
+         __asm__ ("popcnt %1, %0" : "=r" (x) : "0" (x));
+         return x;
+     }
+#elif defined(CPU_X86_64) && defined(_MSC_VER)
     #define HAVE_NATIVE_POPCNT
     #include <nmmintrin.h>
-    static inline size_t popcnt64__native(size_t x) {
+    static inline uint64_t popcnt64__native(uint64_t x) {
         return _mm_popcnt_u64(x);
     }
 #elif GNUC_PREREQ(4, 2) || __has_builtin(__builtin_popcount)
     #define HAVE_NATIVE_POPCNT
-    static inline size_t popcnt64__native(size_t x) {
-        return __builtin_popcountll(x);
+    static inline uint64_t popcnt64__native(uint64_t x) {
+        return (uint64_t) __builtin_popcountll(x);
     }
 #endif
 #ifdef HAVE_NATIVE_POPCNT

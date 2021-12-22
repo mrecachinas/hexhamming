@@ -16,6 +16,8 @@
 //Pointers to functions. Will be inited in PyMODINIT_FUNC by USE__* macros(can be found at end of header file).
 static int (*ptr__hamming_distance_bytes)(const uint8_t*, const uint8_t*, const size_t, const ssize_t);
 static int (*ptr__hamming_distance_string)(const char*, const char*, const size_t);
+static int cpu_capabilities;            //Bit mask off CPU capabilities.
+char cpu_not_support_msg[64];           //"CPU doesnt support this feature. %X" , cpu_capabilities
 
 
 /**
@@ -174,7 +176,7 @@ static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) 
  * @param args      Python arguments for `check_hexstrings_within_dist` interface
  *                  - `string1` -- hex string
  *                  - `string2` -- hex string
- * @returns         
+ * @returns
  */
 static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject *args) {
     char *input_s1;
@@ -310,26 +312,38 @@ static PyObject * set_algo_wrapper(PyObject *self, PyObject *args) {
         return NULL;
     }
 
+    const char *result = "";
     if (strcmp(algo_name, "extra") == 0) {
-        USE__EXTRA
+        if ((cpu_capabilities & bit_AVX2) == bit_AVX2) {
+            USE__EXTRA
+        }
+        else
+            result = cpu_not_support_msg;
     }
 #if defined(HAVE_NATIVE_POPCNT)
     else if (strcmp(algo_name, "native") == 0) {
-        USE__NATIVE
+        if ((cpu_capabilities & bit_POPCNT) == bit_POPCNT) {
+            USE__NATIVE
+        }
+        else
+            result = cpu_not_support_msg;
     }
 #endif
 #if defined(CPU_X86_64)
     else if (strcmp(algo_name, "sse41") == 0) {
-        USE__SSE41
+        if ((cpu_capabilities & bit_SSE41) == bit_SSE41) {
+            USE__SSE41
+        }
+        else
+            result = cpu_not_support_msg;
     }
 #endif
     else if (strcmp(algo_name, "classic") == 0) {
         USE__CLASSIC
     }
-    else {
-        return Py_BuildValue("s", "non supported algorithm.");
-    }
-    return Py_BuildValue("s", "");
+    else
+        result = "Library was built without this algorithm.";
+    return Py_BuildValue("s", result);
 }
 
 ///////////////////////////////////////////////////////////////
@@ -441,7 +455,7 @@ inithexhamming(void)
 
 {
      #if defined(CPU_X86_64)
-        int cpu_capabilities = get_cpuid();
+        cpu_capabilities = get_cpuid();
         if ((cpu_capabilities & bit_AVX2) == bit_AVX2) {
             USE__EXTRA
         }
@@ -458,17 +472,19 @@ inithexhamming(void)
         }
      #else
         #if defined(HAVE_NATIVE_POPCNT)
+            cpu_capabilities = bit_POPCNT;
             USE__NATIVE
         #else
             USE__CLASSIC
         #endif
      #endif
+     snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature. %X", cpu_capabilities);
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "2.1.1")) {
+    if (PyModule_AddStringConstant(module, "__version__", "2.2.0")) {
         Py_XDECREF(module);
         INITERROR;
     }

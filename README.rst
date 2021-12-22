@@ -71,7 +71,7 @@ in essentially raw C. At this point, I'm using raw ``char*`` and
 Installation
 -------------
 
-To install, ensure you have Python 2.7 or 3.4+. Run
+To install, ensure you have Python 3.6+. Run
 
 ::
 
