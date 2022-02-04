@@ -7,6 +7,10 @@
 typedef SSIZE_T ssize_t;
 #endif
 
+#ifndef UINT64_MAX
+    #define UINT64_MAX 0xFFFFFFFFFFFFFFFF
+#endif
+
 #ifndef __has_builtin
     #define __has_builtin(x) 0
 #endif
@@ -57,6 +61,8 @@ typedef SSIZE_T ssize_t;
     #if defined(_MSC_VER)
         #include <intrin.h>
         #include <immintrin.h>
+    #else
+        #include <x86intrin.h>
     #endif
 
     // ecx flags
@@ -122,9 +128,20 @@ typedef SSIZE_T ssize_t;
         #define X64_EXTRA
     #endif
 #else //non x86_64 CPU
-    #if (defined(__ARM_NEON) || defined(__aarch64__))
+    #if (defined(__clang__) && defined(__aarch64__))        //Apple M1
         #define ARM_EXTRA
         #include <arm_neon.h>
+        #define bit_POPCNT 0                                //This CPU supports popcnt.
+        #define bit_AVX2   0                                //This CPU supports extra algorithms.
+    #elif defined(__aarch64__)                              //ARM8 with normal embedded Neon module.
+        #define bit_POPCNT 0
+        #define bit_AVX2   0xFFFFFFFF                       //Temporary: disabled, on emulator extra funcs fails.
+    #elif defined(__ARM_NEON)                               //ARM7 possibly with Neon, but in that CPU it is very slow.
+        #define bit_POPCNT 0
+        #define bit_AVX2   0xFFFFFFFF
+    #else                                                   //Other ARM CPU.
+        #define bit_POPCNT 0xFFFFFFFF
+        #define bit_AVX2   0xFFFFFFFF
     #endif
 #endif
 
@@ -147,9 +164,10 @@ static inline uint64_t popcnt64__classic(uint64_t x) {
     return (x * h01) >> 56;
 }
 
-static int hamming_distance_bytes__classic(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-    size_t difference = 0;
-    size_t i = 0;
+static uint64_t hamming_distance_bytes__classic(const uint8_t* a, const uint8_t* b,
+                                                const uint64_t length, const int64_t max_dist) {
+    uint64_t difference = 0;
+    uint64_t i = 0;
     if (max_dist < 0)
     {
         if (length > 8)
@@ -165,13 +183,13 @@ static int hamming_distance_bytes__classic(const uint8_t* a, const uint8_t* b, c
             for (; i < length - length % 8; i += 8)
             {
                 difference += popcnt64__classic(*(size_t*)(a + i) ^ *(size_t*)(b + i));
-                if (difference > (size_t)max_dist)
+                if (difference > (uint64_t)max_dist)
                     return 0;
             }
         for (; i < length; i++)
         {
             difference += popcnt64__classic(a[i] ^ b[i]);
-            if (difference > (size_t)max_dist)
+            if (difference > (uint64_t)max_dist)
                 return 0;
         }
         return 1;
@@ -194,10 +212,10 @@ static const unsigned char LOOKUP[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 
  * @param string_length length of `a` and `b`
  * @return      the number of bits different between the hexadecimal strings
  */
-inline int hamming_distance_loop_string(const char* a, const char* b, const size_t string_length) {
-    int result = 0;
+inline uint64_t hamming_distance_loop_string(const char* a, const char* b, const uint64_t string_length) {
+    uint64_t result = 0;
     int val1, val2;
-    for (size_t i = 0; i < string_length; ++i) {
+    for (uint64_t i = 0; i < string_length; ++i) {
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
@@ -210,7 +228,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
         // check to make sure all characters are valid
         // hexadecimal in both strings
         if (val1 > 15 || val1 < 0 || val2 > 15 || val2 < 0) {
-            return -1;
+            return UINT64_MAX;
         }
 
         result += LOOKUP[val1 ^ val2];
@@ -222,7 +240,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
 /*------- SSE4.1 -------*/
 #ifdef CPU_X86_64
             /* BYTES */
-    static inline int popcnt128__sse(__m128i n) {
+    static inline int64_t popcnt128__sse(__m128i n) {
         const __m128i n_hi = _mm_unpackhi_epi64(n, n);
         return _mm_popcnt_u64(_mm_cvtsi128_si64(n)) + _mm_popcnt_u64(_mm_cvtsi128_si64(n_hi));
     }
@@ -239,9 +257,10 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
             local = _mm_add_epi8(local, cnt_high); \
             i += 16; \
         }
-    static int hamming_distance_bytes__sse(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-        size_t i = 0;
-        size_t difference = 0;
+    static uint64_t hamming_distance_bytes__sse(const uint8_t* a, const uint8_t* b,
+                                                const uint64_t length, const int64_t max_dist) {
+        uint64_t i = 0;
+        uint64_t difference = 0;
         if (max_dist < 0)
         {
             if (length > 16)
@@ -275,13 +294,13 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
                     const __m128i b16 = _mm_loadu_si128((__m128i *)&b[i]);
                     const __m128i xor_result = _mm_xor_si128(a16, b16);
                     difference += popcnt128__sse(xor_result);
-                    if (difference > (size_t)max_dist)
+                    if (difference > (uint64_t)max_dist)
                         return 0;
                 }
             for (; i < length; i++)
             {
                 difference += popcnt64__classic(a[i] ^ b[i]);
-                if (difference > (size_t)max_dist)
+                if (difference > (uint64_t)max_dist)
                     return 0;
             }
             return 1;
@@ -298,16 +317,16 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
      * @param string_length length of `a` and `b` (MUST be a multiple of 16)
      * @return      the number of bits different between the hexadecimal strings
      */
-    static inline int hamming_distance_sse41_string(const char* a, const char* b, const size_t string_length) {
+    static inline uint64_t hamming_distance_sse41_string(const char* a, const char* b, const uint64_t string_length) {
         bool a_not_lt_0, a_not_gt_15, b_not_lt_0, b_not_gt_15;
-        int result = 0;
+        uint64_t result = 0;
 
-        int fifteen_less = string_length - 15;
+        int64_t fifteen_less = string_length - 15;
 
         __m128i zero = _mm_setzero_si128();
         __m128i fifteen = _mm_set1_epi8(15);
         __m128i xor_result, a_hex, b_hex;
-        for (int i = 0; i < fifteen_less; i += 16) {
+        for (int64_t i = 0; i < fifteen_less; i += 16) {
             // Check if greater than 15 or less than 0
 
             // load 16 chars from `a` and `b`
@@ -362,7 +381,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
 
             // If out of bounds, quit
             if (!(a_not_lt_0 && a_not_gt_15 && b_not_lt_0 && b_not_gt_15)) {
-                return -1;
+                return UINT64_MAX;
             }
 
             // Do the XOR
@@ -383,18 +402,18 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
      * @param string_length length of `a` and `b`
      * @return      the number of bits different between the hexadecimal strings
      */
-    static int hamming_distance_string__sse(const char* a, const char* b, const size_t string_length) {
-        int result = hamming_distance_sse41_string(a, b, string_length);
-        if (result == -1) {
+    static uint64_t hamming_distance_string__sse(const char* a, const char* b, const uint64_t string_length) {
+        uint64_t result = hamming_distance_sse41_string(a, b, string_length);
+        if (result == UINT64_MAX) {
             return result;
         }
 
         char mod16 = string_length & 15;
         if (mod16 != 0) {
-            int fifteen_less = string_length - mod16;
-            int start_index = fifteen_less >= 0 ? fifteen_less : 0;
-            int dist = hamming_distance_loop_string(&a[start_index], &b[start_index], mod16);
-            if (dist == -1) {
+            int64_t fifteen_less = string_length - mod16;
+            uint64_t start_index = fifteen_less >= 0 ? fifteen_less : 0;
+            uint64_t dist = hamming_distance_loop_string(&a[start_index], &b[start_index], mod16);
+            if (dist == UINT64_MAX) {
                 return dist;
             } else {
                 result += dist;
@@ -426,9 +445,10 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
     }
 #endif
 #ifdef HAVE_NATIVE_POPCNT
-    static int hamming_distance_bytes__native(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-        size_t difference = 0;
-        size_t i = 0;
+    static uint64_t hamming_distance_bytes__native(const uint8_t* a, const uint8_t* b,
+                                                   const uint64_t length, const int64_t max_dist) {
+        uint64_t difference = 0;
+        uint64_t i = 0;
         if (max_dist < 0)
         {
             if (length > 8)
@@ -444,13 +464,13 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
                 for (; i < length - length % 8; i += 8)
                 {
                     difference += popcnt64__native(*(size_t*)(a + i) ^ *(size_t*)(b + i));
-                    if (difference > (size_t)max_dist)
+                    if (difference > (uint64_t)max_dist)
                         return 0;
                 }
             for (; i < length; i++)
             {
                 difference += popcnt64__native(a[i] ^ b[i]);
-                if (difference > (size_t)max_dist)
+                if (difference > (uint64_t)max_dist)
                     return 0;
             }
             return 1;
@@ -466,7 +486,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
     #if !defined(_MSC_VER)
         __attribute__ ((target ("avx2")))
     #endif
-    static inline int popcnt256__avx2(__m256i v) {
+    static inline uint64_t popcnt256__avx2(__m256i v) {
          const __m256i lookup1 = _mm256_setr_epi8(
             4, 5, 5, 6, 5, 6, 6, 7,
             5, 6, 6, 7, 6, 7, 7, 8,
@@ -491,10 +511,10 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
     #if !defined(_MSC_VER)
         __attribute__ ((target ("avx2")))
     #endif
-    static int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-        size_t difference = 0;
-        size_t i = 0;
-        __m256i xor_result;
+    static uint64_t hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b,
+                                                  const uint64_t length, const int64_t max_dist) {
+        uint64_t difference = 0;
+        uint64_t i = 0;
         if (max_dist < 0)
         {
             if (length > 32)
@@ -502,8 +522,7 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
                 {
                     __m256i a32 = _mm256_loadu_si256((__m256i *)&a[i]);
                     __m256i b32 = _mm256_loadu_si256((__m256i *)&b[i]);
-                    xor_result = _mm256_xor_si256(a32, b32);
-                    difference += popcnt256__avx2(xor_result);
+                    difference += popcnt256__avx2(_mm256_xor_si256(a32, b32));
                 }
             for (; i < length; i++)
                 difference += popcnt64__native(a[i] ^ b[i]);
@@ -516,38 +535,82 @@ inline int hamming_distance_loop_string(const char* a, const char* b, const size
                 {
                     __m256i a32 = _mm256_loadu_si256((__m256i *)&a[i]);
                     __m256i b32 = _mm256_loadu_si256((__m256i *)&b[i]);
-                    xor_result = _mm256_xor_si256(a32, b32);
-                    difference += popcnt256__avx2(xor_result);
-                    if (difference > (size_t)max_dist)
+                    difference += popcnt256__avx2(_mm256_xor_si256(a32, b32));
+                    if (difference > (uint64_t)max_dist)
                         return 0;
                 }
             for (; i < length; i++)
             {
                 difference += popcnt64__native(a[i] ^ b[i]);
-                if (difference > (size_t)max_dist)
+                if (difference > (uint64_t)max_dist)
                     return 0;
             }
             return 1;
         }
     }
 #elif defined(ARM_EXTRA)
-    static inline uint64x2_t vpadalq(uint64x2_t sum, uint8x16_t t) {
+    static inline uint64x2_t vpadalq(uint64x2_t sum, uint8x16_t t)
+    {
         return vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t)));
     }
-    static int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-        return -1; // TODO.
+    static uint64_t hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b,
+                                                  const uint64_t length, const int64_t max_dist) {
+        if (max_dist > 0)
+            return hamming_distance_bytes__native(a, b, length, max_dist);   //This is faster on ARMs.
+        uint64_t difference = 0;
+        uint64_t i = 0;
+        uint64_t current_iter = 0;
+        uint64_t total_iters = length / 64;
+        if (total_iters >= 1)
+        {
+            uint64x2_t sum = vcombine_u64(vcreate_u64(0), vcreate_u64(0));
+            uint8x16_t zero = vcombine_u8(vcreate_u8(0), vcreate_u8(0));
+            do
+            {
+                uint8x16_t t0 = zero;
+                uint8x16_t t1 = zero;
+                uint8x16_t t2 = zero;
+                uint8x16_t t3 = zero;
+                uint64_t iter_limit = (current_iter + 31 < total_iters) ? current_iter + 31 : total_iters;
+                for (; current_iter < iter_limit; current_iter++) {
+                    uint8x16x4_t input_a = vld4q_u8(&a[i]);
+                    uint8x16x4_t input_b = vld4q_u8(&b[i]);
+                    i += 64;
+                    t0 = vaddq_u8(t0, vcntq_u8(veorq_u8(input_a.val[0], input_b.val[0])));
+                    t1 = vaddq_u8(t1, vcntq_u8(veorq_u8(input_a.val[1], input_b.val[1])));
+                    t2 = vaddq_u8(t2, vcntq_u8(veorq_u8(input_a.val[2], input_b.val[2])));
+                    t3 = vaddq_u8(t3, vcntq_u8(veorq_u8(input_a.val[3], input_b.val[3])));
+                }
+                sum = vpadalq(sum, t0);
+                sum = vpadalq(sum, t1);
+                sum = vpadalq(sum, t2);
+                sum = vpadalq(sum, t3);
+            }
+            while (current_iter < total_iters);
+            uint64_t tmp[2];
+            vst1q_u64(tmp, sum);
+            difference += tmp[0] + tmp[1];
+        }
+        for (; i < length; i++)
+            difference += popcnt64__native(a[i] ^ b[i]);
+        return difference;
     }
 #else
-    static int hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b, const size_t length, const ssize_t max_dist) {
-        return -1;  // We will never call this func.
+    static uint64_t hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b,
+                                                  const uint64_t length, const int64_t max_dist) {
+        return 0;                                                      // We will never call this func.
     }
 #endif
 
 
-//  MACROs for setting algorithm.
+//  MACROses for setting algorithm.
+#if defined(CPU_X86_64)
 #define USE__EXTRA   ptr__hamming_distance_bytes = &hamming_distance_bytes__extra; \
                      ptr__hamming_distance_string = &hamming_distance_string__sse;
-
+#else
+#define USE__EXTRA  ptr__hamming_distance_bytes = &hamming_distance_bytes__extra; \
+                     ptr__hamming_distance_string = &hamming_distance_loop_string;
+#endif
 
 #if defined(CPU_X86_64)
 #define USE__NATIVE  ptr__hamming_distance_bytes = &hamming_distance_bytes__native; \

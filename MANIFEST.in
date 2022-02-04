@@ -1,3 +1,6 @@
 include README.rst
-include requirements.txt
 include requirements-dev.txt
+include pytest.ini
+
+graft test
+graft hexhamming
