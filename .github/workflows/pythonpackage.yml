@@ -48,13 +48,9 @@ jobs:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
-      with:
-        submodules: recursive
-
-    - name: Setup Python
-      uses: actions/setup-python@v2
+    - uses: actions/checkout@v2
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v1
       with:
         python-version: '3.9'
 
@@ -281,17 +277,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [wheels_macos, wheels_linux, wheels_linux_aarch64, wheels_windows]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.9']
 
     steps:
-    - name: 🐍 Set up Python ${{ matrix.python-version }}
+    - name: 🐍 Set up Python
       uses: actions/setup-python@v1
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: '3.9'
 
-    - name: Collect wheels  #Collect sdist and wheels
+    - name: Collect sdist and wheels
       uses: actions/download-artifact@v2
       with:
         name: wheels
