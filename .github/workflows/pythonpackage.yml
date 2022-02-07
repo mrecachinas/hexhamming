@@ -11,18 +11,13 @@ on:
 jobs:
   build-and-test:
     name: Testing with Python 3.${{ matrix.python_minor }} on Linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         python_minor: [ "6" , "7" , "8" , "9" , "10" ]
 
     steps:
       - uses: actions/checkout@v2
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v1
-        with:
-          python-version: '3.9'
-
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -43,15 +38,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
     name: Source distribution
-    runs-on: macos-latest
+    runs-on: macos-11
 
     steps:
     - uses: actions/checkout@v2
-    - name: 🐍 Set up Python
-      uses: actions/setup-python@v1
-      with:
-        python-version: '3.9'
-
     - name: Install requirements
       run: |
         pip3 install --user check-manifest twine
@@ -80,7 +70,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
-    runs-on: macos-latest
+    runs-on: macos-11
     strategy:
       fail-fast: true
       matrix:
@@ -89,11 +79,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - name: 🐍 Set up Python
-      uses: actions/setup-python@v1
-      with:
-        python-version: '3.9'
-
     - name: Install cibuildwheel
       run: |
         python3 -m pip install --upgrade pip
@@ -132,7 +117,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: true
       matrix:
@@ -141,11 +126,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v1
-        with:
-          python-version: '3.9'
-
       - name: Set up QEMU
         if: matrix.cibw_arch == 'aarch64'
         uses: docker/setup-qemu-action@v1
@@ -180,15 +160,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build Windows wheels
-    runs-on: windows-latest
+    runs-on: windows-2019
 
     steps:
       - uses: actions/checkout@v2
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v1
-        with:
-          python-version: '3.9'
-
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -217,14 +192,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [wheels_macos, wheels_linux, wheels_windows]
     name: Publish wheels
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     steps:
-    - name: 🐍 Set up Python
-      uses: actions/setup-python@v1
-      with:
-        python-version: "3.9"
-
     - name: Collect sdist and wheels
       uses: actions/download-artifact@v2
       with:
