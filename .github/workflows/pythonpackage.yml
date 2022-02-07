@@ -10,12 +10,11 @@ on:
 
 jobs:
   build-and-test:
-    name: Test with ${{ matrix.cibw_python }} on Linux
-    runs-on: ubuntu-18.04
+    name: Testing with Python 3.${{ matrix.python_minor }} on Linux
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
       matrix:
-        cibw_python: [ "cp36-*" , "cp37-*" , "cp38-*" , "cp39-*" , "cp310-*" ]
+        python_minor: [ "6" , "7" , "8" , "9" , "10" ]
 
     steps:
       - uses: actions/checkout@v2
@@ -32,8 +31,7 @@ jobs:
       - name: 🛠 Build and Test Hexhamming Python C extension
         run: cibuildwheel
         env:
-          CIBW_BUILD: ${{ matrix.cibw_python }}
-          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_BUILD: ${{ format('cp3{0}-manylinux_x86_64', matrix.python_minor) }}
           CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
@@ -55,20 +53,19 @@ jobs:
         python-version: '3.9'
 
     - name: Install requirements
-      run: pip3 install --user check-manifest twine
+      run: |
+        pip3 install --user check-manifest twine
+        python3 -m pip install --upgrade pip setuptools wheel
+        python3 -m pip install -r requirements-dev.txt
 
     - name: Run check-manifest
       run: python3 -m check_manifest
 
     - name: Build sdist
-      run: |
-        python3 -m pip install --upgrade pip setuptools wheel
-        python3 -m pip install -r requirements-dev.txt
-        python3 -m build --sdist --outdir wheelhouse
+      run: python3 -m build --sdist --outdir wheelhouse
 
     - name: Install from sdist
-      run: |
-        pip3 install --user wheelhouse/*.tar.gz
+      run: pip3 install --user wheelhouse/*.tar.gz
 
     - name: Check sdist
       run: python3 -m twine check wheelhouse/*
@@ -82,12 +79,11 @@ jobs:
   wheels_macos:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
-    name: Build ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
+    runs-on: macos-latest
     strategy:
       fail-fast: true
       matrix:
-        os: [ macos-latest ]
         cibw_python: [ "cp38-*", "cp39-*", "cp310-*" ]
         cibw_arch: [ "x86_64", "arm64" ]
 
@@ -109,8 +105,7 @@ jobs:
       run: echo DEPLOYMENT_TARGET=12.0 >> $GITHUB_ENV
 
     - name: 🛠 Build Hexhamming Python C extension
-      run: |
-        cibuildwheel
+      run: cibuildwheel
       env:
         CIBW_ENVIRONMENT: MACOSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }}
         CIBW_BUILD: ${{ matrix.cibw_python }}
@@ -136,61 +131,13 @@ jobs:
   wheels_linux:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
-    name: Build ${{ matrix.cibw_python }} x86_64 wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        os: [ ubuntu-18.04 ]
-        cibw_arch: ["x86_64"]
-        cibw_python: [ "cp36-*" , "cp37-*" , "cp38-*" , "cp39-*" , "cp310-*" ]
-        cibw_manylinux: [ manylinux2014, musllinux_1_1 ]
-
-    steps:
-      - uses: actions/checkout@v2
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v1
-        with:
-          python-version: '3.9'
-
-      - name: Install cibuildwheel
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel twine
-
-      - name: 🛠 Build Hexhamming Python C extension
-        run: |
-          cibuildwheel
-        env:
-          CIBW_BUILD: ${{ matrix.cibw_python }}
-          CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
-          CIBW_MANYLINUX_I686_IMAGE: ${{ matrix.cibw_manylinux }}
-          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.cibw_manylinux }}
-          CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
-          CIBW_TEST_COMMAND: "pytest -s {project}"
-          CIBW_BUILD_VERBOSITY: 1
-
-      - name: Check built wheels
-        run: twine check wheelhouse/*
-
-      - name: Upload built wheels
-        uses: actions/upload-artifact@v2
-        with:
-          name: wheels
-          path: wheelhouse/*.whl
-          if-no-files-found: error
-
-  wheels_linux_aarch64:
-    if: startsWith(github.ref, 'refs/tags')
-    needs: [build-and-test, sdist]
-    name: Build ${{ matrix.cibw_python }} aarch64 wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [ ubuntu-18.04 ]
-        cibw_python: [ "cp37-*" , "cp38-*" , "cp39-*" , "cp310-*" ]
-        cibw_manylinux: [ manylinux2014, musllinux_1_1 ]
+        cibw_buildlinux: [ manylinux, musllinux ]
+        cibw_arch: [ "x86_64", "aarch64" ]
 
     steps:
       - uses: actions/checkout@v2
@@ -200,6 +147,7 @@ jobs:
           python-version: '3.9'
 
       - name: Set up QEMU
+        if: matrix.cibw_arch == 'aarch64'
         uses: docker/setup-qemu-action@v1
         with:
           platforms: arm64
@@ -210,12 +158,10 @@ jobs:
           python3 -m pip install cibuildwheel twine
 
       - name: 🛠 Build Hexhamming Python C extension
-        run: |
-          cibuildwheel
+        run: cibuildwheel
         env:
-          CIBW_BUILD: ${{ matrix.cibw_python }}
-          CIBW_ARCHS_LINUX: aarch64
-          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.cibw_manylinux }}
+          CIBW_BUILD: ${{ format('cp3*-{0}*', matrix.cibw_buildlinux) }}
+          CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
           CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
@@ -233,13 +179,8 @@ jobs:
   wheels_windows:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
-    name: Build ${{ matrix.cibw_arch }} wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [windows-latest]
-        cibw_arch: ["AMD64"]
+    name: Build Windows wheels
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v2
@@ -254,11 +195,10 @@ jobs:
           python3 -m pip install cibuildwheel twine
 
       - name: 🛠 Build Hexhamming Python C extension
-        run: |
-          cibuildwheel
+        run: cibuildwheel
         env:
           CIBW_BUILD: "cp36-* cp37-* cp38-* cp39-* cp310-*"
-          CIBW_ARCHS_WINDOWS: ${{ matrix.cibw_arch }}
+          CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
@@ -275,14 +215,15 @@ jobs:
 
   publish-wheels:
     if: startsWith(github.ref, 'refs/tags')
-    needs: [wheels_macos, wheels_linux, wheels_linux_aarch64, wheels_windows]
+    needs: [wheels_macos, wheels_linux, wheels_windows]
+    name: Publish wheels
     runs-on: ubuntu-latest
 
     steps:
     - name: 🐍 Set up Python
       uses: actions/setup-python@v1
       with:
-        python-version: '3.9'
+        python-version: "3.9"
 
     - name: Collect sdist and wheels
       uses: actions/download-artifact@v2
