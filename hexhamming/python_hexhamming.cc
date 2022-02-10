@@ -1,21 +1,18 @@
 #include <cstring>
 #include <string.h>
-#if _MSC_VER
-  #include <intrin.h>
-#else
-  #include <x86intrin.h>
-#endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "python_hexhamming.h"
+#include "_version.h"
+
 
 ///////////////////////////////////////////////////////////////
 // C API
 ///////////////////////////////////////////////////////////////
 
 //Pointers to functions. Will be inited in PyMODINIT_FUNC by USE__* macros(can be found at end of header file).
-static int (*ptr__hamming_distance_bytes)(const uint8_t*, const uint8_t*, const size_t, const ssize_t);
-static int (*ptr__hamming_distance_string)(const char*, const char*, const size_t);
+static uint64_t (*ptr__hamming_distance_bytes)(const uint8_t*, const uint8_t*, const uint64_t, const int64_t);
+static uint64_t (*ptr__hamming_distance_string)(const char*, const char*, const uint64_t);
 static int cpu_capabilities;            //Bit mask off CPU capabilities.
 char cpu_not_support_msg[64];           //"CPU doesnt support this feature. %X" , cpu_capabilities
 
@@ -34,8 +31,8 @@ char cpu_not_support_msg[64];           //"CPU doesnt support this feature. %X" 
 inline int check_hexstrings_within_dist(
     const char* a,
     const char* b,
-    size_t string_length,
-    size_t max_dist
+    uint64_t string_length,
+    int64_t max_dist
   ) {
     // if both strings are the same, short circuit
     // and return 0
@@ -43,10 +40,9 @@ inline int check_hexstrings_within_dist(
       return 1;
     }
 
-    size_t result = 0;
+    int64_t result = 0;
     int val1, val2;
-    size_t i;
-    for (i = 0; i < string_length; ++i) {
+    for (size_t i = 0; i < string_length; ++i) {
         // Convert the hex ascii char to its actual hexadecimal value
         // e.g., '0' = 0, 'A' = 10, etc.
         // Note: this is case INSENSITIVE
@@ -101,8 +97,8 @@ static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args
         return NULL;
     }
 
-    size_t input_s1_len = strlen(input_s1);
-    size_t input_s2_len = strlen(input_s2);
+    uint64_t input_s1_len = strlen(input_s1);
+    uint64_t input_s2_len = strlen(input_s2);
 
     // if the two strings are not the same length, can't move on, so raise
     if (input_s1_len != input_s2_len) {
@@ -112,16 +108,16 @@ static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args
 
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
-    int dist = ptr__hamming_distance_string(input_s1, input_s2, input_s1_len);
-    if (dist == -1) {
-      // this should only happen if the strings contain
-      // invalid hexadecimal characters
-      PyErr_SetString(PyExc_ValueError, "hex string contains invalid char");
-      return NULL;
+    uint64_t dist = ptr__hamming_distance_string(input_s1, input_s2, input_s1_len);
+    if (dist == UINT64_MAX) {
+        // this should only happen if the strings contain
+        // invalid hexadecimal characters
+        PyErr_SetString(PyExc_ValueError, "hex string contains invalid char");
+        return NULL;
     } else {
-      // put the unsigned int into a Python Int object
-      // and return back to the caller!
-      return Py_BuildValue("I", dist);
+        // put the unsigned int64 into a Python Int object
+        // and return back to the caller!
+        return Py_BuildValue("K", dist);
     }
 }
 
@@ -137,8 +133,8 @@ static PyObject * hamming_distance_string_wrapper(PyObject *self, PyObject *args
 static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) {
     uint8_t *input_s1;
     uint8_t *input_s2;
-    size_t input_s1_len;
-    size_t input_s2_len;
+    uint64_t input_s1_len = 0;
+    uint64_t input_s2_len = 0;
 
     // get the two strings from `args`
     // if they are incorrect types (i.e., not 's'), this will raise
@@ -165,8 +161,8 @@ static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) 
 
     // at this point, we can safely proceed with
     // our `hamming_distance` computation
-    int dist = ptr__hamming_distance_bytes(input_s1, input_s2, input_s1_len, -1);
-    return Py_BuildValue("I", dist);
+    uint64_t dist = ptr__hamming_distance_bytes(input_s1, input_s2, input_s1_len, -1);
+    return Py_BuildValue("K", dist);
 }
 
 /**
@@ -181,12 +177,12 @@ static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) 
 static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject *args) {
     char *input_s1;
     char *input_s2;
-    unsigned int max_dist;
+    uint64_t max_dist;
 
     // get the two strings from `args`
     // if they are incorrect types (i.e., not 's'), this will raise
     // a ValueError
-    if (!PyArg_ParseTuple(args, "ssI", &input_s1, &input_s2, &max_dist)) {
+    if (!PyArg_ParseTuple(args, "ssK", &input_s1, &input_s2, &max_dist)) {
         PyErr_SetString(
             PyExc_ValueError,
             "error occurred while parsing arguments"
@@ -200,15 +196,15 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
         return NULL;
     }
 
-    size_t input_s1_len = strlen(input_s1);
-    size_t input_s2_len = strlen(input_s2);
+    uint64_t input_s1_len = strlen(input_s1);
+    uint64_t input_s2_len = strlen(input_s2);
 
     if (input_s1_len != input_s2_len) {
         PyErr_SetString(PyExc_ValueError, "strings are NOT the same length");
         return NULL;
     }
 
-    if ((int)max_dist < 0) {
+    if ((int64_t)max_dist < 0) {
         PyErr_SetString(PyExc_ValueError, "`max_dist` must be >0");
         return NULL;
     }
@@ -244,15 +240,16 @@ static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject 
  * @param args      Python arguments for `check_bytes_arrays_within_dist` interface
  *                  - `array_of_elems` - bytes
  *                  - `elem_to_compare` - bytes
- *                  - `max_dist` - int
+ *                  - `max_dist` - int64
  * @returns         index of element in array_of_elems or -1.
  */
 static PyObject * check_bytes_arrays_within_dist_wrapper(PyObject *self, PyObject *args) {
     uint8_t *big_array, *small_array;
-    size_t big_array_size, small_array_size;
-    ssize_t max_dist;
+    uint64_t big_array_size = 0;
+    uint64_t small_array_size = 0;
+    int64_t max_dist;
 
-    if (!PyArg_ParseTuple(args, "s#s#n", &big_array, &big_array_size, &small_array, &small_array_size, &max_dist)) {
+    if (!PyArg_ParseTuple(args, "s#s#L", &big_array, &big_array_size, &small_array, &small_array_size, &max_dist)) {
         PyErr_SetString(
             PyExc_ValueError,
             "error occurred while parsing arguments"
@@ -276,10 +273,10 @@ static PyObject * check_bytes_arrays_within_dist_wrapper(PyObject *self, PyObjec
     }
 
     int res;
-    int number_of_elements = big_array_size / small_array_size;
+    uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
-    for (int i = 0; i < number_of_elements; i++, pBig += small_array_size) {
-        res = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist);
+    for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+        res = (int)ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist);
         if (res == 1)
             return Py_BuildValue("i", i);
         }
@@ -477,14 +474,20 @@ inithexhamming(void)
         #else
             USE__CLASSIC
         #endif
+        USE__EXTRA
      #endif
-     snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature. %X", cpu_capabilities);
+     if (cpu_capabilities != 0) {
+        snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg),
+                    "CPU doesnt support this feature. {%X}", cpu_capabilities);
+     }
+     else
+        snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature.");
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
     PyObject *module = Py_InitModule3("hexhamming", CompareMethods, CompareDocstring);
 #endif
-    if (PyModule_AddStringConstant(module, "__version__", "2.2.0")) {
+    if (PyModule_AddStringConstant(module, "__version__", _version)) {
         Py_XDECREF(module);
         INITERROR;
     }

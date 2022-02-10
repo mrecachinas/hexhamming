@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from platform import machine
 import pytest
 from hexhamming import check_hexstrings_within_dist, hamming_distance_string, \
                         hamming_distance_bytes, check_bytes_arrays_within_dist, set_algo
@@ -65,7 +66,9 @@ def test_hamming_distance_string(hex1, hex2, expected):
     ),
 )
 def test_hamming_distance_byte(hex1, hex2, expected):
-    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    algorithm_list = ['extra', 'native', 'classic']
+    if machine().lower().startswith('x86'):
+        algorithm_list.append('sse41')
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
@@ -107,7 +110,9 @@ def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     ),
 )
 def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
-    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    algorithm_list = ['extra', 'native', 'classic']
+    if machine().lower().startswith('x86'):
+        algorithm_list.append('sse41')
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
@@ -200,7 +205,9 @@ def test_check_bytes_arrays_within_dist_invalid_values(bytes1, bytes2, max_dist,
     ),
 )
 def test_check_bytes_arrays_within_dist_calculation(bytes1, bytes2, max_dist, expected):
-    algorithm_list = ['extra', 'native', 'sse41', 'classic']
+    algorithm_list = ['extra', 'native', 'classic']
+    if machine().lower().startswith('x86'):
+        algorithm_list.append('sse41')
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
