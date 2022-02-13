@@ -23,6 +23,7 @@ if system().lower() == "darwin" and (machine().lower() == "arm64" or
     extra_compile_args.append("-mcpu=apple-m1")
 elif uname().system == 'Windows':
     extra_compile_args.append("-O2")
+    extra_compile_args.append("/d2FH4-")
 else:
     extra_compile_args.append("-march=native")
 
