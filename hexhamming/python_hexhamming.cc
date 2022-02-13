@@ -476,12 +476,7 @@ inithexhamming(void)
         #endif
         USE__EXTRA
      #endif
-     if (cpu_capabilities != 0) {
-        snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg),
-                    "CPU doesnt support this feature. {%X}", cpu_capabilities);
-     }
-     else
-        snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature.");
+     snprintf(cpu_not_support_msg, sizeof(cpu_not_support_msg), "CPU doesnt support this feature. {%X}", cpu_capabilities);
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = PyModule_Create(&hexhammingdef);
 #else
