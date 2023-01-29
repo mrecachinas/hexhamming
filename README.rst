@@ -109,7 +109,7 @@ Using ``hexhamming`` is as simple as
     >>> hamming_distance_string("deadbeef", "00000000")
     24
 
-**New in v2.0.0** : ``hexhamming`` now supports `byte`s via ``hamming_distance_bytes``.
+**New in v2.0.0** : ``hexhamming`` now supports ``byte``s via ``hamming_distance_bytes``.
 You use it in the exact same way as before, except you pass in a byte string.
 
 ::
@@ -130,8 +130,7 @@ are within a given Hamming distance.
     False
 
 Similarly, we support ``byte``s via ``check_bytes_arrays_within_dist``, which has
-the same API as ``check_hexstrings_within_dist``, except it expects ``byte``s as
-the parameter.
+the same API as ``check_hexstrings_within_dist``, except it expects a byte string.
 
 Benchmark
 ---------
