@@ -118,6 +118,20 @@ You use it in the exact same way as before, except you pass in a byte string.
     >>> hamming_distance_bytes(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00")
     24
 
+We also provide a method for a quick boolean check of whether two hexadecimal strings
+are within a given Hamming distance.
+
+::
+
+    >>> from hexhamming import check_hexstrings_within_dist
+    >>> check_hexstrings_within_dist("ffff", "fffe", 2)
+    True
+    >>> check_hexstrings_within_dist("ffff", "0000", 2)
+    False
+
+Similarly, we support `byte`s via `check_bytes_arrays_within_dist`, which has
+the same API as `check_hexstrings_within_dist`, except for `byte`s
+
 Benchmark
 ---------
 
