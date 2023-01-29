@@ -130,7 +130,8 @@ are within a given Hamming distance.
     False
 
 Similarly, we support `byte`s via `check_bytes_arrays_within_dist`, which has
-the same API as `check_hexstrings_within_dist`, except for `byte`s
+the same API as `check_hexstrings_within_dist`, except it expects `byte`s as
+the parameter.
 
 Benchmark
 ---------
