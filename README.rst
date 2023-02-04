@@ -129,8 +129,10 @@ are within a given Hamming distance.
     >>> check_hexstrings_within_dist("ffff", "0000", 2)
     False
 
-Similarly, ``hexhamming`` supports byte strings via ``check_bytes_arrays_within_dist``, which has
-the same API as ``check_hexstrings_within_dist``, except it expects a byte string.
+Similarly, ``hexhamming`` supports byte arrays via ``check_bytes_arrays_within_dist``, which has
+a similar API as ``check_hexstrings_within_dist``, except it expects a byte array. Additionally,
+it will check if any element of a byte array is within a specified Hamming Distance of another
+byte array.
 
 Benchmark
 ---------
