@@ -129,7 +129,7 @@ are within a given Hamming distance.
     False
 	
 Similarly, ``hexhamming`` supports a quick byte array check via ``check_bytes_within_dist``, which has
-a similar API as ``check_hexstrings_within_dist``, except it expects a byte array. 
+a similar API as ``check_hexstrings_within_dist``, except it expects a bytes array. 
 
 The API described above is targeted at comparing two individual records and calculate their hamming distance quickly.
 For many applications the goal is compare a given record to an array of other records and to find out if there 
