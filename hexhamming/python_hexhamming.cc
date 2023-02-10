@@ -271,9 +271,9 @@ static PyObject * check_bytes_within_dist_wrapper(PyObject *self, PyObject *args
         PyErr_SetString(PyExc_ValueError, "array sizes need to be the same");
         return NULL;
     }
-
-	int64_t result;
-	result = ptr__hamming_distance_bytes(array_1, array_2, array_2_size, max_dist);
+    
+    int64_t result;
+    result = ptr__hamming_distance_bytes(array_1, array_2, array_2_size, max_dist);
 		
     return Py_BuildValue("O", result == 1 ? Py_True : Py_False);
 }
@@ -319,21 +319,20 @@ static PyObject * check_bytes_arrays_first_within_dist_wrapper(PyObject *self, P
 
     int64_t ret = -1;
 	
-	Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS
 	
     uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
 	uint64_t res;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
         res = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist);
-        if (res == 1)
-		{
+        if (res == 1){
             ret = i;
-			break;
+            break;
         }
-	}
+    }
 	
-	Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS
 	
     return Py_BuildValue("i", ret);
 }
@@ -377,10 +376,10 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
         return NULL;
     }
 
-	int64_t best_dist = max_dist + 1;
-	int64_t best_index = -1;
+    int64_t best_dist = max_dist + 1;
+    int64_t best_index = -1;
 
-	Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS
 
     uint64_t dist;
     uint64_t number_of_elements = big_array_size / small_array_size;
@@ -388,18 +387,18 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
         dist = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, -1);
         if (dist < best_dist) {
-			best_dist = dist;
-			best_index = i;
+            best_dist = dist;
+            best_index = i;
         }
-	}
+    }
 	
-	// Anything found? If not, set dist to -1
-	if (best_index == -1)
-	{
-		best_dist = -1;
-	}
+    // Anything found? If not, set dist to -1
+    if (best_index == -1)
+    {
+        best_dist = -1;
+    }
 	
-	Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS
 	
     return Py_BuildValue("ii", best_dist, best_index);
 }
@@ -444,45 +443,45 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
     }
 
     uint64_t number_of_elements = big_array_size / small_array_size;
-	uint64_t *out = new uint64_t[number_of_elements * 2];
-	uint64_t *o = out;
+    uint64_t *out = new uint64_t[number_of_elements * 2];
+    uint64_t *o = out;
 
-	Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS
 
     uint64_t dist;
     uint8_t* pBig = big_array;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
         dist = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, -1);
         if (dist <= max_dist) {
-			*o++ = dist;
-			*o++ = i;
+            *o++ = dist;
+            *o++ = i;
         }
-	}
+    }
 	
-	Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS
 	
-	/* Assemble result... */
-	PyObject *my_list = PyList_New(0);
-	if ( my_list == NULL )  
-	{
-		PyErr_NoMemory();
-	}
+    /* Assemble result... */
+    PyObject *my_list = PyList_New(0);
+    if ( my_list == NULL )  
+    {
+        PyErr_NoMemory();
+    }
 	
-	for (uint64_t *op = out; op < o; op += 2)
-	{
-		PyObject *tup = Py_BuildValue("ii", op[0], op[1]);
-		if (tup == NULL)
-		{
-			PyErr_NoMemory();
-		}
+    for (uint64_t *op = out; op < o; op += 2)
+    {
+        PyObject *tup = Py_BuildValue("ii", op[0], op[1]);
+        if (tup == NULL)
+        {
+            PyErr_NoMemory();
+        }
 		
-		if(PyList_Append(my_list, tup) == -1) 
-		{
-			PyErr_NoMemory();
-		}
-	}
+        if(PyList_Append(my_list, tup) == -1) 
+        {
+            PyErr_NoMemory();
+        }
+    }
 	
-	delete [] out;
+    delete [] out;
 	
     return my_list;
 }
