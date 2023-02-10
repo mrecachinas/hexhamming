@@ -109,7 +109,7 @@ Using ``hexhamming`` is as simple as
     >>> hamming_distance_string("deadbeef", "00000000")
     24
 
-**New in v2.0.0** : ``hexhamming`` now supports `byte`s via ``hamming_distance_bytes``.
+**New in v2.0.0** : ``hexhamming`` now supports ``byte``s via ``hamming_distance_bytes``.
 You use it in the exact same way as before, except you pass in a byte string.
 
 ::
@@ -117,6 +117,22 @@ You use it in the exact same way as before, except you pass in a byte string.
     >>> from hexhamming import hamming_distance_bytes
     >>> hamming_distance_bytes(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00")
     24
+
+We also provide a method for a quick boolean check of whether two hexadecimal strings
+are within a given Hamming distance.
+
+::
+
+    >>> from hexhamming import check_hexstrings_within_dist
+    >>> check_hexstrings_within_dist("ffff", "fffe", 2)
+    True
+    >>> check_hexstrings_within_dist("ffff", "0000", 2)
+    False
+
+Similarly, ``hexhamming`` supports byte arrays via ``check_bytes_arrays_within_dist``, which has
+a similar API as ``check_hexstrings_within_dist``, except it expects a byte array. Additionally,
+it will check if any element of a byte array is within a specified Hamming Distance of another
+byte array.
 
 Benchmark
 ---------
