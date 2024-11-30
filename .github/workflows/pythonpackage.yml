@@ -17,7 +17,7 @@ jobs:
         python_minor: [ "6" , "7" , "8" , "9" , "10" ]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -41,7 +41,7 @@ jobs:
     runs-on: macos-11
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4.2.2
     - name: Install requirements
       run: |
         pip3 install --user check-manifest twine
@@ -61,7 +61,7 @@ jobs:
       run: python3 -m twine check wheelhouse/*
 
     - name: Upload sdist
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4.4.3
       with:
         name: wheels
         path: wheelhouse/*.tar.gz
@@ -78,7 +78,7 @@ jobs:
         cibw_arch: [ "x86_64", "arm64" ]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4.2.2
     - name: Install cibuildwheel
       run: |
         python3 -m pip install --upgrade pip
@@ -107,7 +107,7 @@ jobs:
       run: twine check wheelhouse/*
 
     - name: Upload built wheels
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4.4.3
       with:
         name: wheels
         path: wheelhouse/*.whl
@@ -125,10 +125,10 @@ jobs:
         cibw_arch: [ "x86_64", "aarch64" ]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Set up QEMU
         if: matrix.cibw_arch == 'aarch64'
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@v3.2.0
         with:
           platforms: arm64
 
@@ -150,7 +150,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -163,7 +163,7 @@ jobs:
     runs-on: windows-2019
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -182,7 +182,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -196,7 +196,7 @@ jobs:
 
     steps:
     - name: Collect sdist and wheels
-      uses: actions/download-artifact@v4.1.7
+      uses: actions/download-artifact@v4.1.8
       with:
         name: wheels
         path: wheelhouse
