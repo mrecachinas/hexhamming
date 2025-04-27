@@ -11,7 +11,7 @@ on:
 jobs:
   build-and-test:
     name: Testing with Python 3.${{ matrix.python_minor }} on Linux
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         python_minor: [ "6" , "7" , "8" , "9" , "10" ]
