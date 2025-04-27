@@ -309,3 +309,29 @@ def test_check_hexstrings_within_dist_bench(benchmark):
 )
 def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
     benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
+
+
+def test_check_bytes_arrays_within_dist_gil():
+    import threading
+    import time
+
+    def run_check():
+        big_array = b"\x00" * 16 * 1000000
+        small_array = b"\x00" * 16
+        max_dist = 0
+        result = check_bytes_arrays_within_dist(big_array, small_array, max_dist)
+        assert result == 0
+
+    def run_other_task():
+        for _ in range(5):
+            print("Running other task")
+            time.sleep(0.1)
+
+    check_thread = threading.Thread(target=run_check)
+    other_task_thread = threading.Thread(target=run_other_task)
+
+    check_thread.start()
+    other_task_thread.start()
+
+    check_thread.join()
+    other_task_thread.join()

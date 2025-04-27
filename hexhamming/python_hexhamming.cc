@@ -272,15 +272,24 @@ static PyObject * check_bytes_arrays_within_dist_wrapper(PyObject *self, PyObjec
         return NULL;
     }
 
+    int return_value = -1;
+
+    Py_BEGIN_ALLOW_THREADS
+
     int res;
     uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
         res = (int)ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist);
-        if (res == 1)
-            return Py_BuildValue("i", i);
+        if (res == 1) {
+            return_value = i;
+            break;
         }
-    return Py_BuildValue("i", -1);
+    }
+
+    Py_END_ALLOW_THREADS
+
+    return Py_BuildValue("i", return_value);
 }
 
 /**
