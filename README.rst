@@ -166,7 +166,7 @@ distance less than ``max_dist``, or ``(-1,-1)`` if none do.
 
 
 ``check_bytes_arrays_all_within_dist`` returns a  list of tuples with the distance and the index of the element that have a hamming 
-distance less than ``max_dist``, or ``[])`` if none do.
+distance less than ``max_dist``, or ``[]`` if none do.
 
 ::
 
