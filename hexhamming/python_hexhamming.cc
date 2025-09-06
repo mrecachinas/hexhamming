@@ -172,7 +172,7 @@ static PyObject * hamming_distance_byte_wrapper(PyObject *self, PyObject *args) 
  * @param args      Python arguments for `check_hexstrings_within_dist` interface
  *                  - `string1` -- hex string
  *                  - `string2` -- hex string
- * @returns			True if the hamming distance is less or equal to max_dist, False otherwise.
+ * @returns         True if the hamming distance is less or equal to max_dist, False otherwise.
  */
 static PyObject * check_hexstrings_within_dist_wrapper(PyObject *self, PyObject *args) {
     char *input_s1;
