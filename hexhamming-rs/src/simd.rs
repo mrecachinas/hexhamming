@@ -205,6 +205,7 @@ pub fn hamming_distance_bytes_avx2(_a: &[u8], _b: &[u8]) -> u64 {
 /// Convert hex characters to nibbles using SIMD (SSE4.1)
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
+#[allow(dead_code)]
 unsafe fn hamming_distance_string_sse41_impl(a: &str, b: &str) -> Result<u64, &'static str> {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
@@ -218,8 +219,8 @@ unsafe fn hamming_distance_string_sse41_impl(a: &str, b: &str) -> Result<u64, &'
     // Process 16 characters at a time when possible
     while i + 16 <= len {
         // Load 16 characters
-        let a_chunk = _mm_loadu_si128(a_bytes.as_ptr().add(i) as *const __m128i);
-        let b_chunk = _mm_loadu_si128(b_bytes.as_ptr().add(i) as *const __m128i);
+        let _a_chunk = _mm_loadu_si128(a_bytes.as_ptr().add(i) as *const __m128i);
+        let _b_chunk = _mm_loadu_si128(b_bytes.as_ptr().add(i) as *const __m128i);
         
         // Convert to nibbles and compute XOR
         let mut local_result = 0u64;
@@ -276,6 +277,7 @@ unsafe fn hamming_distance_string_sse41_impl(a: &str, b: &str) -> Result<u64, &'
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 pub fn hamming_distance_string_sse41(a: &str, b: &str) -> Result<u64, &'static str> {
     if has_sse41() {
         unsafe { hamming_distance_string_sse41_impl(a, b) }

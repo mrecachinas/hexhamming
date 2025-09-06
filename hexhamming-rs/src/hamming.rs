@@ -4,57 +4,59 @@ use crate::simd;
 /// LOOKUP[i] = number of 1 bits in i (for i in 0..16)
 const LOOKUP: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 
-/// Convert hex character to its numeric value (0-15)
-/// Returns None if the character is not a valid hex digit
+/// Fast hex character to nibble conversion - optimized and unsafe for performance
 #[inline]
-fn hex_char_to_nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        _ => None,
+unsafe fn hex_char_to_nibble_unchecked(c: u8) -> u8 {
+    // This mirrors the C++ implementation exactly:
+    // val = (c > '9') ? (c &~ 0x20) - 55: (c - '0');
+    if c > b'9' {
+        (c & !0x20) - 55  // Convert A-F/a-f to 10-15, case insensitive
+    } else {
+        c - b'0'  // Convert 0-9 to 0-9
     }
 }
 
-/// Optimized implementation using lookup table with chunked processing
+/// Safe wrapper that validates the result
+#[inline]
+fn hex_char_to_nibble_fast(c: u8) -> Option<u8> {
+    unsafe {
+        let result = hex_char_to_nibble_unchecked(c);
+        if result <= 15 {
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
+/// Simple and fast implementation matching C++ performance
 fn hamming_distance_string_classic(a: &str, b: &str) -> Result<u64, &'static str> {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
-    let mut result = 0u64;
     let len = a_bytes.len();
-    let mut i = 0;
+    let mut result = 0u64;
     
-    // Process in chunks of 8 for better performance
-    while i + 8 <= len {
-        let mut chunk_result = 0u64;
-        for j in 0..8 {
-            let val1 = hex_char_to_nibble(a_bytes[i + j])
-                .ok_or("hex string contains invalid char")?;
-            let val2 = hex_char_to_nibble(b_bytes[i + j])
-                .ok_or("hex string contains invalid char")?;
+    // Simple loop like C++ version - sometimes simpler is faster
+    for i in 0..len {
+        // Do unsafe conversion first, then validate
+        unsafe {
+            let val1 = hex_char_to_nibble_unchecked(a_bytes[i]);
+            let val2 = hex_char_to_nibble_unchecked(b_bytes[i]);
             
-            chunk_result += LOOKUP[(val1 ^ val2) as usize] as u64;
+            // Check bounds (like C++ version)
+            if val1 > 15 || val2 > 15 {
+                return Err("hex string contains invalid char");
+            }
+            
+            result += LOOKUP[(val1 ^ val2) as usize] as u64;
         }
-        result += chunk_result;
-        i += 8;
-    }
-    
-    // Process remaining characters
-    while i < len {
-        let val1 = hex_char_to_nibble(a_bytes[i])
-            .ok_or("hex string contains invalid char")?;
-        let val2 = hex_char_to_nibble(b_bytes[i])
-            .ok_or("hex string contains invalid char")?;
-        
-        result += LOOKUP[(val1 ^ val2) as usize] as u64;
-        i += 1;
     }
     
     Ok(result)
 }
 
 /// Classic popcount implementation for u64
-#[inline]
+#[allow(dead_code)]
 fn popcount_classic(mut x: u64) -> u64 {
     // Brian Kernighan's algorithm optimized version
     const M1: u64 = 0x5555555555555555;
@@ -69,6 +71,7 @@ fn popcount_classic(mut x: u64) -> u64 {
 }
 
 /// Classic implementation for byte arrays
+#[allow(dead_code)]
 fn hamming_distance_bytes_classic(a: &[u8], b: &[u8]) -> u64 {
     let mut result = 0u64;
     let len = a.len();
@@ -130,15 +133,8 @@ fn hamming_distance_bytes_native(a: &[u8], b: &[u8]) -> u64 {
 
 /// Auto-selecting implementation that chooses the best algorithm
 pub fn hamming_distance_string_impl(a: &str, b: &str) -> Result<u64, &'static str> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Use SIMD for longer strings when available
-        if a.len() >= 16 && simd::has_sse41() {
-            return simd::hamming_distance_string_sse41(a, b);
-        }
-    }
-    
-    // Fallback to classic implementation
+    // Always use the optimized classic implementation 
+    // The current SIMD implementation needs more work to be faster than this optimized version
     hamming_distance_string_classic(a, b)
 }
 
@@ -173,9 +169,9 @@ pub fn check_hexstrings_within_dist_impl(a: &str, b: &str, max_dist: u64) -> Res
     let mut result = 0u64;
     
     for i in 0..a_bytes.len() {
-        let val1 = hex_char_to_nibble(a_bytes[i])
+        let val1 = hex_char_to_nibble_fast(a_bytes[i])
             .ok_or("hex string contains invalid char")?;
-        let val2 = hex_char_to_nibble(b_bytes[i])
+        let val2 = hex_char_to_nibble_fast(b_bytes[i])
             .ok_or("hex string contains invalid char")?;
         
         result += LOOKUP[(val1 ^ val2) as usize] as u64;
