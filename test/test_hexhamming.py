@@ -324,7 +324,8 @@ def test_check_bytes_arrays_within_dist_gil():
 
     def run_other_task():
         for _ in range(5):
-            print("Running other task")
+        for _ in range(5):
+            time.sleep(0.1)
             time.sleep(0.1)
 
     check_thread = threading.Thread(target=run_check)
