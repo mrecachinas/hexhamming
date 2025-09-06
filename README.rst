@@ -83,10 +83,16 @@ or to install from source
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
-    python setup.py install # or pip install .
+    pip install .
 
 If you want to contribute to hexhamming, you should install the dev
 dependencies
+
+::
+
+    pip install -e ".[dev]"
+
+Alternatively, you can still use the legacy method:
 
 ::
 

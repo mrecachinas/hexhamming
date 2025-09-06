@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexhamming"
+dynamic = ["version"]
+description = "Fast Hamming distance calculation for hexadecimal strings"
+readme = "README.rst"
+license = {text = "MIT"}
+authors = [
+    {name = "Michael Recachinas", email = "m.recachinas@gmail.com"}
+]
+keywords = ["hamming", "distance", "simd"]
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux", 
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: C"
+]
+requires-python = ">=3.6"
+
+[project.urls]
+Repository = "https://github.com/mrecachinas/hexhamming.git"
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "pytest", 
+    "pytest-benchmark"
+]
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+include = ["hexhamming*"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
