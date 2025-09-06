@@ -7,7 +7,7 @@ name = "hexhamming"
 dynamic = ["version"]
 description = "Fast Hamming distance calculation for hexadecimal strings"
 readme = "README.rst"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 authors = [
     {name = "Michael Recachinas", email = "m.recachinas@gmail.com"}
 ]
