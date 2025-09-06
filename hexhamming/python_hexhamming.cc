@@ -393,8 +393,7 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
     }
 	
     // Anything found? If not, set dist to -1
-    if (best_index == -1)
-    {
+    if (best_index == -1) {
         best_dist = -1;
     }
 	
