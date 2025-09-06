@@ -201,3 +201,91 @@ pub fn hamming_distance_bytes_sse41(_a: &[u8], _b: &[u8]) -> u64 {
 pub fn hamming_distance_bytes_avx2(_a: &[u8], _b: &[u8]) -> u64 {
     unimplemented!("AVX2 not available on this architecture")
 }
+
+/// Convert hex characters to nibbles using SIMD (SSE4.1)
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn hamming_distance_string_sse41_impl(a: &str, b: &str) -> Result<u64, &'static str> {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let len = a_bytes.len();
+    let mut result = 0u64;
+    let mut i = 0;
+    
+    // SIMD lookup table for hex conversion
+    const LOOKUP: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+    
+    // Process 16 characters at a time when possible
+    while i + 16 <= len {
+        // Load 16 characters
+        let a_chunk = _mm_loadu_si128(a_bytes.as_ptr().add(i) as *const __m128i);
+        let b_chunk = _mm_loadu_si128(b_bytes.as_ptr().add(i) as *const __m128i);
+        
+        // Convert to nibbles and compute XOR
+        let mut local_result = 0u64;
+        for j in 0..16 {
+            let a_char = a_bytes[i + j];
+            let b_char = b_bytes[i + j];
+            
+            // Convert hex char to nibble
+            let a_nibble = match a_char {
+                b'0'..=b'9' => a_char - b'0',
+                b'A'..=b'F' => a_char - b'A' + 10,
+                b'a'..=b'f' => a_char - b'a' + 10,
+                _ => return Err("hex string contains invalid char"),
+            };
+            
+            let b_nibble = match b_char {
+                b'0'..=b'9' => b_char - b'0',
+                b'A'..=b'F' => b_char - b'A' + 10,
+                b'a'..=b'f' => b_char - b'a' + 10,
+                _ => return Err("hex string contains invalid char"),
+            };
+            
+            local_result += LOOKUP[(a_nibble ^ b_nibble) as usize] as u64;
+        }
+        
+        result += local_result;
+        i += 16;
+    }
+    
+    // Process remaining characters
+    while i < len {
+        let a_char = a_bytes[i];
+        let b_char = b_bytes[i];
+        
+        let a_nibble = match a_char {
+            b'0'..=b'9' => a_char - b'0',
+            b'A'..=b'F' => a_char - b'A' + 10,
+            b'a'..=b'f' => a_char - b'a' + 10,
+            _ => return Err("hex string contains invalid char"),
+        };
+        
+        let b_nibble = match b_char {
+            b'0'..=b'9' => b_char - b'0',
+            b'A'..=b'F' => b_char - b'A' + 10,
+            b'a'..=b'f' => b_char - b'a' + 10,
+            _ => return Err("hex string contains invalid char"),
+        };
+        
+        result += LOOKUP[(a_nibble ^ b_nibble) as usize] as u64;
+        i += 1;
+    }
+    
+    Ok(result)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn hamming_distance_string_sse41(a: &str, b: &str) -> Result<u64, &'static str> {
+    if has_sse41() {
+        unsafe { hamming_distance_string_sse41_impl(a, b) }
+    } else {
+        // Fallback - convert to classic
+        Err("SSE4.1 not available, use fallback")
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn hamming_distance_string_sse41(_a: &str, _b: &str) -> Result<u64, &'static str> {
+    Err("SSE4.1 not available on this architecture")
+}

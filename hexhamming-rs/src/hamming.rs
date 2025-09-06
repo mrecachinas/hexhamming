@@ -16,19 +16,38 @@ fn hex_char_to_nibble(c: u8) -> Option<u8> {
     }
 }
 
-/// Classic implementation using lookup table
+/// Optimized implementation using lookup table with chunked processing
 fn hamming_distance_string_classic(a: &str, b: &str) -> Result<u64, &'static str> {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let mut result = 0u64;
+    let len = a_bytes.len();
+    let mut i = 0;
     
-    for i in 0..a_bytes.len() {
+    // Process in chunks of 8 for better performance
+    while i + 8 <= len {
+        let mut chunk_result = 0u64;
+        for j in 0..8 {
+            let val1 = hex_char_to_nibble(a_bytes[i + j])
+                .ok_or("hex string contains invalid char")?;
+            let val2 = hex_char_to_nibble(b_bytes[i + j])
+                .ok_or("hex string contains invalid char")?;
+            
+            chunk_result += LOOKUP[(val1 ^ val2) as usize] as u64;
+        }
+        result += chunk_result;
+        i += 8;
+    }
+    
+    // Process remaining characters
+    while i < len {
         let val1 = hex_char_to_nibble(a_bytes[i])
             .ok_or("hex string contains invalid char")?;
         let val2 = hex_char_to_nibble(b_bytes[i])
             .ok_or("hex string contains invalid char")?;
         
         result += LOOKUP[(val1 ^ val2) as usize] as u64;
+        i += 1;
     }
     
     Ok(result)
@@ -111,8 +130,15 @@ fn hamming_distance_bytes_native(a: &[u8], b: &[u8]) -> u64 {
 
 /// Auto-selecting implementation that chooses the best algorithm
 pub fn hamming_distance_string_impl(a: &str, b: &str) -> Result<u64, &'static str> {
-    // For now, use the classic implementation
-    // TODO: Add SIMD-optimized version for longer strings
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Use SIMD for longer strings when available
+        if a.len() >= 16 && simd::has_sse41() {
+            return simd::hamming_distance_string_sse41(a, b);
+        }
+    }
+    
+    // Fallback to classic implementation
     hamming_distance_string_classic(a, b)
 }
 
