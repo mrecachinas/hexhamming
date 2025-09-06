@@ -1,0 +1,26 @@
+[package]
+name = "hexhamming-rs"
+version = "2.2.3"
+edition = "2021"
+description = "Fast Hamming distance calculation for hexadecimal strings - Rust implementation"
+repository = "https://github.com/mrecachinas/hexhamming"
+license = "MIT"
+authors = ["Michael Recachinas <m.recachinas@gmail.com>"]
+
+[lib]
+name = "hexhamming_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[build-dependencies]
+pyo3-build-config = "0.23"
