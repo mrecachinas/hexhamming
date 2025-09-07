@@ -18,14 +18,14 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: C"
 ]
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 
 [project.urls]
 Repository = "https://github.com/mrecachinas/hexhamming.git"
 
 [project.optional-dependencies]
 dev = [
-    "black",
+    "ruff",
     "pytest", 
     "pytest-benchmark"
 ]
