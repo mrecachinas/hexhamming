@@ -12,9 +12,6 @@ jobs:
   build-and-test:
     name: Testing with Python 3.${{ matrix.python_minor }} on Linux
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python_minor: [ "10" , "11" , "12" , "13" ]
 
     steps:
       - uses: actions/checkout@v5.0.0
@@ -26,7 +23,7 @@ jobs:
       - name: 🛠 Build and Test Hexhamming Python C extension
         run: cibuildwheel
         env:
-          CIBW_BUILD: ${{ format('cp3{0}-manylinux_x86_64', matrix.python_minor) }}
+          CIBW_BUILD: "cp3*-manylinux_x86_64"
           CIBW_BEFORE_TEST: pip install -r ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
@@ -74,7 +71,6 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        cibw_python: [ "cp38-*", "cp39-*", "cp310-*" ]
         cibw_arch: [ "x86_64", "arm64" ]
 
     steps:
@@ -93,7 +89,7 @@ jobs:
       run: cibuildwheel
       env:
         CIBW_ENVIRONMENT: MACOSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }}
-        CIBW_BUILD: ${{ matrix.cibw_python }}
+        CIBW_BUILD: "cp3*"
         CIBW_ARCHS_MACOS: ${{ matrix.cibw_arch }}
         CIBW_TEST_SKIP: "*-macosx_arm64"
         CC: /usr/bin/clang
@@ -172,7 +168,7 @@ jobs:
       - name: 🛠 Build Hexhamming Python C extension
         run: cibuildwheel
         env:
-          CIBW_BUILD: "cp36-* cp37-* cp38-* cp39-* cp310-*"
+          CIBW_BUILD: "cp3*"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_TEST: pip install -r ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
