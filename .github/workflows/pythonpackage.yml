@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Testing with Python 3.${{ matrix.python_minor }} on Linux
+    name: Testing on Linux
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
         run: cibuildwheel
         env:
           CIBW_BUILD: "cp3*-manylinux_x86_64"
-          CIBW_BEFORE_TEST: pip install -r ".[dev]"
+          CIBW_BEFORE_TEST: pip install ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -43,7 +43,7 @@ jobs:
       run: |
         pip3 install --user check-manifest twine
         python3 -m pip install --upgrade pip setuptools wheel
-        python3 -m pip install -r ".[dev]"
+        python3 -m pip install ".[dev]"
 
     - name: Run check-manifest
       run: python3 -m check_manifest
@@ -95,7 +95,7 @@ jobs:
         CC: /usr/bin/clang
         CXX: /usr/bin/clang++
         CFLAGS: "-Wno-implicit-function-declaration"
-        CIBW_BEFORE_TEST: pip install -r ".[dev]"
+        CIBW_BEFORE_TEST: pip install ".[dev]"
         CIBW_TEST_COMMAND: "pytest -s {project}"
         CIBW_BUILD_VERBOSITY: 1
 
@@ -138,7 +138,7 @@ jobs:
         env:
           CIBW_BUILD: ${{ format('cp3*-{0}*', matrix.cibw_buildlinux) }}
           CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
-          CIBW_BEFORE_TEST: pip install -r ".[dev]"
+          CIBW_BEFORE_TEST: pip install ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -170,7 +170,7 @@ jobs:
         env:
           CIBW_BUILD: "cp3*"
           CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_BEFORE_TEST: pip install -r ".[dev]"
+          CIBW_BEFORE_TEST: pip install ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
