@@ -13,10 +13,11 @@ def get_version():
 
 # Platform-specific compiler optimization flags
 extra_compile_args = []
-if system().lower() == "darwin" and (machine().lower() == "arm64" or
-                                     environ.get("CIBW_ARCHS_MACOS", "") == "arm64"):
+if system().lower() == "darwin" and (
+    machine().lower() == "arm64" or environ.get("CIBW_ARCHS_MACOS", "") == "arm64"
+):
     extra_compile_args.append("-mcpu=apple-m1")
-elif uname().system == 'Windows':
+elif uname().system == "Windows":
     extra_compile_args.append("-O2")
     extra_compile_args.append("/d2FH4-")
 else:
