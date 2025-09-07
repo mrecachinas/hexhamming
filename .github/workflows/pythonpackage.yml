@@ -17,7 +17,7 @@ jobs:
         python_minor: [ "10" , "11" , "12" , "13" ]
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5.0.0
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -27,7 +27,7 @@ jobs:
         run: cibuildwheel
         env:
           CIBW_BUILD: ${{ format('cp3{0}-manylinux_x86_64', matrix.python_minor) }}
-          CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
+          CIBW_BEFORE_TEST: pip install -r ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -38,15 +38,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
     name: Source distribution
-    runs-on: macos-11
+    runs-on: macos-latest
 
     steps:
-    - uses: actions/checkout@v4.2.2
+    - uses: actions/checkout@v5.0.0
     - name: Install requirements
       run: |
         pip3 install --user check-manifest twine
         python3 -m pip install --upgrade pip setuptools wheel
-        python3 -m pip install -r requirements-dev.txt
+        python3 -m pip install -r ".[dev]"
 
     - name: Run check-manifest
       run: python3 -m check_manifest
@@ -61,7 +61,7 @@ jobs:
       run: python3 -m twine check wheelhouse/*
 
     - name: Upload sdist
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: wheels
         path: wheelhouse/*.tar.gz
@@ -70,7 +70,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
-    runs-on: macos-11
+    runs-on: macos-latest
     strategy:
       fail-fast: true
       matrix:
@@ -78,7 +78,7 @@ jobs:
         cibw_arch: [ "x86_64", "arm64" ]
 
     steps:
-    - uses: actions/checkout@v4.2.2
+    - uses: actions/checkout@v5.0.0
     - name: Install cibuildwheel
       run: |
         python3 -m pip install --upgrade pip
@@ -99,7 +99,7 @@ jobs:
         CC: /usr/bin/clang
         CXX: /usr/bin/clang++
         CFLAGS: "-Wno-implicit-function-declaration"
-        CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
+        CIBW_BEFORE_TEST: pip install -r ".[dev]"
         CIBW_TEST_COMMAND: "pytest -s {project}"
         CIBW_BUILD_VERBOSITY: 1
 
@@ -107,7 +107,7 @@ jobs:
       run: twine check wheelhouse/*
 
     - name: Upload built wheels
-      uses: actions/upload-artifact@v4.4.3
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: wheels
         path: wheelhouse/*.whl
@@ -117,7 +117,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
@@ -125,7 +125,7 @@ jobs:
         cibw_arch: [ "x86_64", "aarch64" ]
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5.0.0
       - name: Set up QEMU
         if: matrix.cibw_arch == 'aarch64'
         uses: docker/setup-qemu-action@v3.2.0
@@ -142,7 +142,7 @@ jobs:
         env:
           CIBW_BUILD: ${{ format('cp3*-{0}*', matrix.cibw_buildlinux) }}
           CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
-          CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
+          CIBW_BEFORE_TEST: pip install -r ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -150,7 +150,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v4.4.3
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -160,10 +160,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build Windows wheels
-    runs-on: windows-2019
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5.0.0
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -174,7 +174,7 @@ jobs:
         env:
           CIBW_BUILD: "cp36-* cp37-* cp38-* cp39-* cp310-*"
           CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_BEFORE_TEST: pip install -r requirements-dev.txt
+          CIBW_BEFORE_TEST: pip install -r ".[dev]"
           CIBW_TEST_COMMAND: "pytest -s {project}"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -182,7 +182,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v4.4.3
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -192,20 +192,19 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [wheels_macos, wheels_linux, wheels_windows]
     name: Publish wheels
-    runs-on: ubuntu-20.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hexhamming
+    permissions:
+      id-token: write
+    runs-on: ubuntu-latest
 
     steps:
     - name: Collect sdist and wheels
-      uses: actions/download-artifact@v4.1.8
+      uses: actions/download-artifact@v5.0.0
       with:
         name: wheels
-        path: wheelhouse
-
-    - name: Install twine
-      run: python -m pip install twine
+        path: dist
 
     - name: 📦 Publish distribution to PyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: twine upload --skip-existing wheelhouse/*
+      uses: pypa/gh-action-pypi-publish@release/v1
