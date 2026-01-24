@@ -32,7 +32,7 @@ Repository = "https://github.com/mrecachinas/hexhamming.git"
 
 [dependency-groups]
 dev = [
-    "black",
+    "ruff",
     "pytest",
     "pytest-benchmark",
 ]
@@ -44,6 +44,9 @@ packages = []
 [tool.pytest.ini_options]
 testpaths = ["test"]
 
-[tool.black]
+[tool.ruff]
 line-length = 88
-target-version = ["py38", "py39", "py310", "py311", "py312"]
+target-version = "py38"
+
+[tool.ruff.format]
+quote-style = "double"
