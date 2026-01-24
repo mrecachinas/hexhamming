@@ -2,4 +2,4 @@ include README.rst
 include pyproject.toml
 
 graft test
-graft hexhamming
+graft src
