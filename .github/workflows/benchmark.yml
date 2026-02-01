@@ -207,31 +207,50 @@ jobs:
               })
           
           has_severe_regression = len(severe_regressions) > 0
+          
+          # Separate significant changes from noise
+          significant = [r for r in results if r['status'] != '➖']
+          within_noise = [r for r in results if r['status'] == '➖']
 
           # Generate markdown report
-          report_lines = [
-              "## 📊 Benchmark Comparison Results",
-              "",
-              "| Status | Benchmark | Base | PR | Delta |",
-              "|:------:|:----------|-----:|---:|:------|",
-          ]
-
-          for r in results:
-              report_lines.append(
-                  f"| {r['status']} | `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
-              )
+          report_lines = ["## 📊 Benchmark Comparison Results", ""]
+          
+          if not significant:
+              report_lines.append("### ✅ All benchmarks within noise")
+              report_lines.append("")
+              report_lines.append(f"*{len(within_noise)} benchmarks compared, no significant changes detected.*")
+          else:
+              report_lines.extend([
+                  "| Status | Benchmark | Base | PR | Delta |",
+                  "|:------:|:----------|-----:|---:|:------|",
+              ])
+              
+              # Sort: regressions first (❌, ⚠️), then improvements (✅), then new/removed
+              status_order = {'❌': 0, '⚠️': 1, '✅': 2, '🆕': 3, '🗑️': 4}
+              significant.sort(key=lambda r: (status_order.get(r['status'], 5), -abs(r['pct_change'])))
+              
+              for r in significant:
+                  report_lines.append(
+                      f"| {r['status']} | `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+                  )
+              
+              report_lines.extend([
+                  "",
+                  "<details>",
+                  f"<summary>➖ {len(within_noise)} benchmarks within noise (click to expand)</summary>",
+                  "",
+                  "| Benchmark | Base | PR | Delta |",
+                  "|:----------|-----:|---:|:------|",
+              ])
+              for r in within_noise:
+                  report_lines.append(
+                      f"| `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+                  )
+              report_lines.extend(["", "</details>"])
 
           report_lines.extend([
               "",
-              "### Legend",
-              "- ✅ **Faster** (>5% improvement)",
-              "- ➖ **Within noise** (within measurement variance)",
-              "- ⚠️ **Slower** (possible regression, 5-30%)",
-              "- ❌ **Severe regression** (>30% slower, exceeds 2x noise level)",
-              "- 🆕 **New benchmark**",
-              "- 🗑️ **Removed benchmark**",
-              "",
-              f"*Comparing {len(base_benchmarks)} base benchmarks with {len(pr_benchmarks)} PR benchmarks*",
+              "**Legend:** ✅ Faster (>5%) · ⚠️ Slower (5-30%) · ❌ Regression (>30%) · 🆕 New · 🗑️ Removed",
           ])
 
           if has_severe_regression:
