@@ -169,6 +169,7 @@ jobs:
               
               # Calculate percentage change (negative = faster, positive = slower)
               pct_change = ((pr['median'] - base['median']) / base['median']) * 100
+              abs_change_ms = abs(pr['median'] - base['median'])
               
               # Check if the change is statistically significant
               # Use coefficient of variation to assess noise level
@@ -176,8 +177,15 @@ jobs:
               pr_cv = (pr['stddev'] / pr['median']) * 100 if pr['median'] > 0 else 0
               noise_threshold = max(base_cv, pr_cv, 10)  # At least 10% noise floor
               
+              # For very fast benchmarks (<0.001ms = 1µs), require minimum absolute change
+              # to avoid flagging noise as regressions
+              min_abs_change_ms = 0.001  # 1µs minimum meaningful change
+              is_too_small_to_matter = abs_change_ms < min_abs_change_ms
+              
               # Determine status - account for noise in thresholds
-              if pct_change < -max(5, noise_threshold):
+              if is_too_small_to_matter:
+                  status = '➖'  # Too small to matter
+              elif pct_change < -max(5, noise_threshold):
                   status = '✅'  # Faster beyond noise
               elif abs(pct_change) <= max(5, noise_threshold):
                   status = '➖'  # Within noise
@@ -185,8 +193,8 @@ jobs:
                   status = '⚠️'  # Possibly slower (5-30%)
               else:
                   status = '❌'  # Severe regression (>30%)
-                  # Only flag as severe if change exceeds 2x the noise level
-                  if pct_change > 2 * noise_threshold:
+                  # Only flag as severe if change exceeds 2x the noise level AND absolute threshold
+                  if pct_change > 2 * noise_threshold and not is_too_small_to_matter:
                       severe_regressions.append(short_name)
               
               # Format delta string
