@@ -301,6 +301,10 @@ fn hamming_distance_bytes_native(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
 }
 
 // x86_64 SIMD implementations
+// Note: Unlike ARM64, x86 SSE/AVX2 implementations use VPSHUFB-based popcount which
+// processes 16/32 bytes in parallel with a lookup table. This is typically faster than
+// scalar count_ones() because it avoids horizontal reduction overhead. The ARM64 native
+// approach works better there because the CNT instruction handles accumulation efficiently.
 #[cfg(target_arch = "x86_64")]
 mod x86_simd {
     use super::*;
@@ -677,93 +681,11 @@ mod x86_simd {
     }
 }
 
-// ARM NEON implementations
-#[cfg(target_arch = "aarch64")]
-mod arm_simd {
-    use super::*;
-    use std::arch::aarch64::*;
-
-    /// NEON implementation for byte arrays - uses hardware vcnt (popcount) instruction
-    #[target_feature(enable = "neon")]
-    pub unsafe fn hamming_distance_bytes_neon(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
-        let length = a.len();
-
-        // For small inputs or early termination, use optimized scalar
-        if length < 64 || max_dist >= 0 {
-            return hamming_distance_bytes_native(a, b, max_dist);
-        }
-
-        let mut i = 0;
-        let mut sum = vdupq_n_u64(0);
-        let zero = vdupq_n_u8(0);
-
-        // Process 256 bytes at a time (4 x 64 bytes) before horizontal accumulation
-        // This maximizes throughput by keeping per-lane counts in u8 (max 255)
-        while i + 256 <= length {
-            let mut t0 = zero;
-            let mut t1 = zero;
-            let mut t2 = zero;
-            let mut t3 = zero;
-
-            // 4 iterations of 64 bytes = 256 bytes
-            // Per-lane max: 4 x 64 bits = 256 bits / 16 lanes = 16 bits/lane, fits in u8
-            for _ in 0..4 {
-                let input_a = vld4q_u8(a.as_ptr().add(i));
-                let input_b = vld4q_u8(b.as_ptr().add(i));
-
-                t0 = vaddq_u8(t0, vcntq_u8(veorq_u8(input_a.0, input_b.0)));
-                t1 = vaddq_u8(t1, vcntq_u8(veorq_u8(input_a.1, input_b.1)));
-                t2 = vaddq_u8(t2, vcntq_u8(veorq_u8(input_a.2, input_b.2)));
-                t3 = vaddq_u8(t3, vcntq_u8(veorq_u8(input_a.3, input_b.3)));
-
-                i += 64;
-            }
-
-            // Horizontal accumulation: u8 -> u16 -> u32 -> u64
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t0)));
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t1)));
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t2)));
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(t3)));
-        }
-
-        // Process remaining 64-byte chunks
-        while i + 64 <= length {
-            let input_a = vld4q_u8(a.as_ptr().add(i));
-            let input_b = vld4q_u8(b.as_ptr().add(i));
-
-            let cnt0 = vcntq_u8(veorq_u8(input_a.0, input_b.0));
-            let cnt1 = vcntq_u8(veorq_u8(input_a.1, input_b.1));
-            let cnt2 = vcntq_u8(veorq_u8(input_a.2, input_b.2));
-            let cnt3 = vcntq_u8(veorq_u8(input_a.3, input_b.3));
-
-            // Sum all 4 vectors
-            let combined = vaddq_u8(vaddq_u8(cnt0, cnt1), vaddq_u8(cnt2, cnt3));
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(combined)));
-
-            i += 64;
-        }
-
-        // Process remaining 16-byte chunks
-        while i + 16 <= length {
-            let a16 = vld1q_u8(a.as_ptr().add(i));
-            let b16 = vld1q_u8(b.as_ptr().add(i));
-            let cnt = vcntq_u8(veorq_u8(a16, b16));
-            sum = vpadalq_u32(sum, vpaddlq_u16(vpaddlq_u8(cnt)));
-            i += 16;
-        }
-
-        // Extract final sum
-        let mut difference = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
-
-        // Process remaining bytes
-        while i < length {
-            difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
-            i += 1;
-        }
-
-        difference
-    }
-}
+// ARM64 NEON note:
+// Benchmarks on Apple Silicon (M-series) show that Rust's auto-vectorized count_ones()
+// is faster than handwritten NEON intrinsics (vcntq_u8 + horizontal sums). The compiler
+// generates optimal CNT instructions and handles accumulation efficiently. Therefore,
+// ALGO_NEON on ARM64 uses the same code path as ALGO_NATIVE.
 
 /// Dispatch to appropriate byte distance implementation based on current algorithm
 #[inline(always)]
@@ -791,8 +713,11 @@ fn hamming_distance_bytes_dispatch(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
             }
         }
 
+        // On ARM64, NEON and native use the same optimized implementation
+        // Benchmarks show that Rust's auto-vectorized count_ones() on Apple Silicon
+        // is faster than handwritten NEON intrinsics (vcntq_u8 + horizontal sums)
         #[cfg(target_arch = "aarch64")]
-        ALGO_NEON => unsafe { arm_simd::hamming_distance_bytes_neon(a, b, max_dist) },
+        ALGO_NEON => hamming_distance_bytes_native(a, b, max_dist),
 
         _ => hamming_distance_bytes_native(a, b, max_dist),
     }
