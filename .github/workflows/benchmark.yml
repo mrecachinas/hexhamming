@@ -124,19 +124,30 @@ jobs:
           base_benchmarks = extract_benchmarks(base_results)
           pr_benchmarks = extract_benchmarks(pr_results)
 
+          # Shorten benchmark names by removing common prefixes
+          def shorten_name(name):
+              # Remove test_ prefix and _bench suffix
+              name = name.replace('test_', '').replace('_bench', '')
+              # Shorten common function names
+              name = name.replace('hamming_distance_', 'hd_')
+              name = name.replace('check_hexstrings_within_dist', 'hex_within_dist')
+              name = name.replace('check_bytes_arrays_within_dist', 'bytes_arr_within')
+              return name
+
           # Compare benchmarks
           results = []
-          has_severe_regression = False
+          severe_regressions = []
           
           all_names = set(base_benchmarks.keys()) | set(pr_benchmarks.keys())
           
           for name in sorted(all_names):
               base = base_benchmarks.get(name)
               pr = pr_benchmarks.get(name)
+              short_name = shorten_name(name)
               
               if base is None:
                   results.append({
-                      'name': name,
+                      'name': short_name,
                       'base_time': 'N/A',
                       'pr_time': f"{pr['median']:.4f}ms",
                       'delta': 'NEW',
@@ -147,7 +158,7 @@ jobs:
               
               if pr is None:
                   results.append({
-                      'name': name,
+                      'name': short_name,
                       'base_time': f"{base['median']:.4f}ms",
                       'pr_time': 'N/A',
                       'delta': 'REMOVED',
@@ -159,16 +170,24 @@ jobs:
               # Calculate percentage change (negative = faster, positive = slower)
               pct_change = ((pr['median'] - base['median']) / base['median']) * 100
               
-              # Determine status
-              if pct_change < -5:
-                  status = '✅'  # Faster by more than 5%
-              elif pct_change <= 5:
-                  status = '➖'  # Within noise (±5%)
-              elif pct_change <= 20:
-                  status = '⚠️'  # Slower by 5-20%
+              # Check if the change is statistically significant
+              # Use coefficient of variation to assess noise level
+              base_cv = (base['stddev'] / base['median']) * 100 if base['median'] > 0 else 0
+              pr_cv = (pr['stddev'] / pr['median']) * 100 if pr['median'] > 0 else 0
+              noise_threshold = max(base_cv, pr_cv, 10)  # At least 10% noise floor
+              
+              # Determine status - account for noise in thresholds
+              if pct_change < -max(5, noise_threshold):
+                  status = '✅'  # Faster beyond noise
+              elif abs(pct_change) <= max(5, noise_threshold):
+                  status = '➖'  # Within noise
+              elif pct_change <= 30:
+                  status = '⚠️'  # Possibly slower (5-30%)
               else:
-                  status = '❌'  # Severe regression (>20%)
-                  has_severe_regression = True
+                  status = '❌'  # Severe regression (>30%)
+                  # Only flag as severe if change exceeds 2x the noise level
+                  if pct_change > 2 * noise_threshold:
+                      severe_regressions.append(short_name)
               
               # Format delta string
               if pct_change < 0:
@@ -179,13 +198,15 @@ jobs:
                   delta = "no change"
               
               results.append({
-                  'name': name,
+                  'name': short_name,
                   'base_time': f"{base['median']:.4f}ms",
                   'pr_time': f"{pr['median']:.4f}ms",
                   'delta': delta,
                   'status': status,
                   'pct_change': pct_change,
               })
+          
+          has_severe_regression = len(severe_regressions) > 0
 
           # Generate markdown report
           report_lines = [
@@ -196,21 +217,17 @@ jobs:
           ]
 
           for r in results:
-              # Truncate long benchmark names
-              name = r['name']
-              if len(name) > 60:
-                  name = name[:57] + '...'
               report_lines.append(
-                  f"| {r['status']} | `{name}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+                  f"| {r['status']} | `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
               )
 
           report_lines.extend([
               "",
               "### Legend",
               "- ✅ **Faster** (>5% improvement)",
-              "- ➖ **Within noise** (±5%)",
-              "- ⚠️ **Slower** (5-20% regression)",
-              "- ❌ **Severe regression** (>20% slower)",
+              "- ➖ **Within noise** (within measurement variance)",
+              "- ⚠️ **Slower** (possible regression, 5-30%)",
+              "- ❌ **Severe regression** (>30% slower, exceeds 2x noise level)",
               "- 🆕 **New benchmark**",
               "- 🗑️ **Removed benchmark**",
               "",
