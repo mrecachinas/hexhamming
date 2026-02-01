@@ -976,8 +976,9 @@ fn check_bytes_arrays_within_dist(
 
         #[cfg(target_arch = "aarch64")]
         ALGO_NEON => {
+            // NEON now uses native count_ones() which auto-vectorizes well on ARM64
             array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                |a, b, m| unsafe { arm_simd::hamming_distance_bytes_neon(a, b, m) })
+                hamming_distance_bytes_native)
         }
 
         _ => {
