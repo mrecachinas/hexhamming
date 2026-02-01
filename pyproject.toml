@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "hexhamming"
+version = "2.2.3"
+description = "Fast Hamming distance calculation for hexadecimal strings"
+readme = "README.rst"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Michael Recachinas", email = "m.recachinas@gmail.com" }
+]
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+keywords = ["hamming", "distance", "simd"]
+
+[project.urls]
+Homepage = "https://github.com/mrecachinas/hexhamming"
+Repository = "https://github.com/mrecachinas/hexhamming.git"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "hexhamming"

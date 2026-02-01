@@ -1,6 +1,8 @@
 include README.rst
 include requirements-dev.txt
 include pytest.ini
+include Cargo.toml
 
 graft test
 graft hexhamming
+graft src
