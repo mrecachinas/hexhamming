@@ -21,7 +21,7 @@ jobs:
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel twine
+          python3 -m pip install cibuildwheel 'twine>=6.0.0'
 
       - name: 🛠 Build and Test Hexhamming Python C extension
         run: cibuildwheel
@@ -85,7 +85,7 @@ jobs:
     - name: Install cibuildwheel
       run: |
         python3 -m pip install --upgrade pip
-        python3 -m pip install cibuildwheel twine
+        python3 -m pip install cibuildwheel 'twine>=6.0.0'
 
     - name: 🛠 Build Hexhamming Python C extension
       run: cibuildwheel
@@ -132,7 +132,7 @@ jobs:
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel twine
+          python3 -m pip install cibuildwheel 'twine>=6.0.0'
 
       - name: 🛠 Build Hexhamming Python C extension
         run: cibuildwheel
@@ -164,7 +164,7 @@ jobs:
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel twine
+          python3 -m pip install cibuildwheel 'twine>=6.0.0'
 
       - name: 🛠 Build Hexhamming Python C extension
         run: cibuildwheel
