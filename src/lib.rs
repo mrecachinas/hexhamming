@@ -964,6 +964,32 @@ fn check_hexstrings_within_dist(
     Ok(true)
 }
 
+/// Macro for zero-overhead array scanning loop
+/// Duplicates loop body for each algorithm to eliminate ALL call overhead
+macro_rules! array_scan_loop {
+    ($big_array:expr, $elem_size:expr, $num_elements:expr, $small_array:expr, $max_dist:expr, $hamming_call:expr) => {{
+        // Raw pointer arithmetic like C++ for zero-overhead iteration
+        let big_ptr = $big_array.as_ptr();
+        let elem_size = $elem_size;
+        let num_elements = $num_elements;
+        let max_dist = $max_dist;
+        let mut i: usize = 0;
+        
+        while i < num_elements {
+            // SAFETY: We've verified big_array.len() is a multiple of elem_size
+            let chunk = unsafe { std::slice::from_raw_parts(big_ptr.add(i * elem_size), elem_size) };
+            
+            if $hamming_call(chunk, $small_array, max_dist) == 1 {
+                return Ok(i as i64);
+            }
+            
+            i += 1;
+        }
+        
+        Ok(-1i64)
+    }};
+}
+
 /// Check if any element of byte array is within a specified Hamming Distance
 /// and return its index or -1 otherwise.
 #[pyfunction]
@@ -1001,18 +1027,39 @@ fn check_bytes_arrays_within_dist(
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
 
-    for i in 0..num_elements {
-        let start = i * elem_size;
-        let end = start + elem_size;
-        let chunk = &big_array[start..end];
+    // Resolve algorithm ONCE outside the loop (like C++ function pointer)
+    // Each arm has its own inlined loop - no function pointer/closure overhead
+    let algo = CURRENT_ALGO.load(Ordering::Relaxed);
 
-        let res = hamming_distance_bytes_dispatch(chunk, small_array, max_dist_val);
-        if res == 1 {
-            return Ok(i as i64);
+    match algo {
+        ALGO_CLASSIC => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                hamming_distance_bytes_classic)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        ALGO_AVX2 if is_x86_feature_detected!("avx2") => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, m) })
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        ALGO_SSE41 if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("popcnt") => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_sse(a, b, m) })
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        ALGO_NEON => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                |a, b, m| unsafe { arm_simd::hamming_distance_bytes_neon(a, b, m) })
+        }
+
+        _ => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                hamming_distance_bytes_native)
         }
     }
-
-    Ok(-1)
 }
 
 /// Change algorithm used for calculations
