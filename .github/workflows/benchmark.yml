@@ -1,0 +1,262 @@
+name: Benchmark PR
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  benchmark-base:
+    name: Benchmark base branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install .
+
+      - name: Run benchmarks
+        run: |
+          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-base
+          path: results.json
+          retention-days: 1
+
+  benchmark-pr:
+    name: Benchmark PR branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install .
+
+      - name: Run benchmarks
+        run: |
+          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-pr
+          path: results.json
+          retention-days: 1
+
+  compare:
+    name: Compare benchmarks
+    needs: [benchmark-base, benchmark-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download base benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-base
+          path: base
+
+      - name: Download PR benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-pr
+          path: pr
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compare benchmarks and generate report
+        id: compare
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          import sys
+
+          # Load benchmark results
+          with open('base/results.json', 'r') as f:
+              base_results = json.load(f)
+
+          with open('pr/results.json', 'r') as f:
+              pr_results = json.load(f)
+
+          # Extract benchmark data into dictionaries
+          def extract_benchmarks(data):
+              benchmarks = {}
+              for bench in data.get('benchmarks', []):
+                  name = bench['name']
+                  # Use median as the primary metric (more stable than mean)
+                  stats = bench['stats']
+                  benchmarks[name] = {
+                      'mean': stats['mean'] * 1000,  # Convert to ms
+                      'median': stats['median'] * 1000,
+                      'stddev': stats['stddev'] * 1000,
+                      'rounds': stats['rounds'],
+                  }
+              return benchmarks
+
+          base_benchmarks = extract_benchmarks(base_results)
+          pr_benchmarks = extract_benchmarks(pr_results)
+
+          # Compare benchmarks
+          results = []
+          has_severe_regression = False
+          
+          all_names = set(base_benchmarks.keys()) | set(pr_benchmarks.keys())
+          
+          for name in sorted(all_names):
+              base = base_benchmarks.get(name)
+              pr = pr_benchmarks.get(name)
+              
+              if base is None:
+                  results.append({
+                      'name': name,
+                      'base_time': 'N/A',
+                      'pr_time': f"{pr['median']:.4f}ms",
+                      'delta': 'NEW',
+                      'status': '🆕',
+                      'pct_change': 0,
+                  })
+                  continue
+              
+              if pr is None:
+                  results.append({
+                      'name': name,
+                      'base_time': f"{base['median']:.4f}ms",
+                      'pr_time': 'N/A',
+                      'delta': 'REMOVED',
+                      'status': '🗑️',
+                      'pct_change': 0,
+                  })
+                  continue
+              
+              # Calculate percentage change (negative = faster, positive = slower)
+              pct_change = ((pr['median'] - base['median']) / base['median']) * 100
+              
+              # Determine status
+              if pct_change < -5:
+                  status = '✅'  # Faster by more than 5%
+              elif pct_change <= 5:
+                  status = '➖'  # Within noise (±5%)
+              elif pct_change <= 20:
+                  status = '⚠️'  # Slower by 5-20%
+              else:
+                  status = '❌'  # Severe regression (>20%)
+                  has_severe_regression = True
+              
+              # Format delta string
+              if pct_change < 0:
+                  delta = f"{abs(pct_change):.1f}% faster"
+              elif pct_change > 0:
+                  delta = f"{pct_change:.1f}% slower"
+              else:
+                  delta = "no change"
+              
+              results.append({
+                  'name': name,
+                  'base_time': f"{base['median']:.4f}ms",
+                  'pr_time': f"{pr['median']:.4f}ms",
+                  'delta': delta,
+                  'status': status,
+                  'pct_change': pct_change,
+              })
+
+          # Generate markdown report
+          report_lines = [
+              "## 📊 Benchmark Comparison Results",
+              "",
+              "| Status | Benchmark | Base | PR | Delta |",
+              "|:------:|:----------|-----:|---:|:------|",
+          ]
+
+          for r in results:
+              # Truncate long benchmark names
+              name = r['name']
+              if len(name) > 60:
+                  name = name[:57] + '...'
+              report_lines.append(
+                  f"| {r['status']} | `{name}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+              )
+
+          report_lines.extend([
+              "",
+              "### Legend",
+              "- ✅ **Faster** (>5% improvement)",
+              "- ➖ **Within noise** (±5%)",
+              "- ⚠️ **Slower** (5-20% regression)",
+              "- ❌ **Severe regression** (>20% slower)",
+              "- 🆕 **New benchmark**",
+              "- 🗑️ **Removed benchmark**",
+              "",
+              f"*Comparing {len(base_benchmarks)} base benchmarks with {len(pr_benchmarks)} PR benchmarks*",
+          ])
+
+          if has_severe_regression:
+              report_lines.extend([
+                  "",
+                  "---",
+                  "⛔ **This PR has severe performance regressions (>20% slower).** Please investigate before merging.",
+              ])
+
+          report = '\n'.join(report_lines)
+          
+          # Write report to file for the comment action
+          with open('benchmark-report.md', 'w') as f:
+              f.write(report)
+
+          # Set outputs using GitHub Actions environment files
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"has_regression={'true' if has_severe_regression else 'false'}\n")
+
+          # Print report to console
+          print(report)
+          
+          EOF
+
+      - name: Find existing comment
+        uses: peter-evans/find-comment@v3
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '📊 Benchmark Comparison Results'
+
+      - name: Create or update comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: benchmark-report.md
+          edit-mode: replace
+
+      - name: Fail on severe regression
+        if: steps.compare.outputs.has_regression == 'true'
+        run: |
+          echo "::error::Severe performance regression detected (>20% slower)"
+          exit 1
