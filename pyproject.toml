@@ -7,12 +7,13 @@ name = "hexhamming"
 version = "2.2.3"
 description = "Fast Hamming distance calculation for hexadecimal strings"
 readme = "README.rst"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     { name = "Michael Recachinas", email = "m.recachinas@gmail.com" }
 ]
 keywords = ["hamming", "distance", "simd"]
 classifiers = [
+    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
