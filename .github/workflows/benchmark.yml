@@ -1,0 +1,306 @@
+name: Benchmark PR
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  benchmark-base:
+    name: Benchmark base branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install .
+
+      - name: Run benchmarks
+        run: |
+          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-base
+          path: results.json
+          retention-days: 1
+
+  benchmark-pr:
+    name: Benchmark PR branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install .
+
+      - name: Run benchmarks
+        run: |
+          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-pr
+          path: results.json
+          retention-days: 1
+
+  compare:
+    name: Compare benchmarks
+    needs: [benchmark-base, benchmark-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download base benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-base
+          path: base
+
+      - name: Download PR benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-pr
+          path: pr
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compare benchmarks and generate report
+        id: compare
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          import sys
+
+          # Load benchmark results
+          with open('base/results.json', 'r') as f:
+              base_results = json.load(f)
+
+          with open('pr/results.json', 'r') as f:
+              pr_results = json.load(f)
+
+          # Extract benchmark data into dictionaries
+          def extract_benchmarks(data):
+              benchmarks = {}
+              for bench in data.get('benchmarks', []):
+                  name = bench['name']
+                  # Use median as the primary metric (more stable than mean)
+                  stats = bench['stats']
+                  benchmarks[name] = {
+                      'mean': stats['mean'] * 1000,  # Convert to ms
+                      'median': stats['median'] * 1000,
+                      'stddev': stats['stddev'] * 1000,
+                      'rounds': stats['rounds'],
+                  }
+              return benchmarks
+
+          base_benchmarks = extract_benchmarks(base_results)
+          pr_benchmarks = extract_benchmarks(pr_results)
+
+          # Shorten benchmark names by removing common prefixes
+          def shorten_name(name):
+              # Remove test_ prefix and _bench suffix
+              name = name.replace('test_', '').replace('_bench', '')
+              # Shorten common function names
+              name = name.replace('hamming_distance_', 'hd_')
+              name = name.replace('check_hexstrings_within_dist', 'hex_within_dist')
+              name = name.replace('check_bytes_arrays_within_dist', 'bytes_arr_within')
+              return name
+
+          # Compare benchmarks
+          results = []
+          severe_regressions = []
+          
+          all_names = set(base_benchmarks.keys()) | set(pr_benchmarks.keys())
+          
+          for name in sorted(all_names):
+              base = base_benchmarks.get(name)
+              pr = pr_benchmarks.get(name)
+              short_name = shorten_name(name)
+              
+              if base is None:
+                  results.append({
+                      'name': short_name,
+                      'base_time': 'N/A',
+                      'pr_time': f"{pr['median']:.4f}ms",
+                      'delta': 'NEW',
+                      'status': '🆕',
+                      'pct_change': 0,
+                  })
+                  continue
+              
+              if pr is None:
+                  results.append({
+                      'name': short_name,
+                      'base_time': f"{base['median']:.4f}ms",
+                      'pr_time': 'N/A',
+                      'delta': 'REMOVED',
+                      'status': '🗑️',
+                      'pct_change': 0,
+                  })
+                  continue
+              
+              # Calculate percentage change (negative = faster, positive = slower)
+              pct_change = ((pr['median'] - base['median']) / base['median']) * 100
+              abs_change_ms = abs(pr['median'] - base['median'])
+              
+              # Check if the change is statistically significant
+              # Use coefficient of variation to assess noise level
+              base_cv = (base['stddev'] / base['median']) * 100 if base['median'] > 0 else 0
+              pr_cv = (pr['stddev'] / pr['median']) * 100 if pr['median'] > 0 else 0
+              noise_threshold = max(base_cv, pr_cv, 10)  # At least 10% noise floor
+              
+              # For very fast benchmarks (<0.001ms = 1µs), require minimum absolute change
+              # to avoid flagging noise as regressions
+              min_abs_change_ms = 0.001  # 1µs minimum meaningful change
+              is_too_small_to_matter = abs_change_ms < min_abs_change_ms
+              
+              # Determine status - account for noise in thresholds
+              if is_too_small_to_matter:
+                  status = '➖'  # Too small to matter
+              elif pct_change < -max(5, noise_threshold):
+                  status = '✅'  # Faster beyond noise
+              elif abs(pct_change) <= max(5, noise_threshold):
+                  status = '➖'  # Within noise
+              elif pct_change <= 30:
+                  status = '⚠️'  # Possibly slower (5-30%)
+              else:
+                  status = '❌'  # Severe regression (>30%)
+                  # Only flag as severe if change exceeds 2x the noise level AND absolute threshold
+                  if pct_change > 2 * noise_threshold and not is_too_small_to_matter:
+                      severe_regressions.append(short_name)
+              
+              # Format delta string
+              if pct_change < 0:
+                  delta = f"{abs(pct_change):.1f}% faster"
+              elif pct_change > 0:
+                  delta = f"{pct_change:.1f}% slower"
+              else:
+                  delta = "no change"
+              
+              results.append({
+                  'name': short_name,
+                  'base_time': f"{base['median']:.4f}ms",
+                  'pr_time': f"{pr['median']:.4f}ms",
+                  'delta': delta,
+                  'status': status,
+                  'pct_change': pct_change,
+              })
+          
+          has_severe_regression = len(severe_regressions) > 0
+          
+          # Separate significant changes from noise
+          significant = [r for r in results if r['status'] != '➖']
+          within_noise = [r for r in results if r['status'] == '➖']
+
+          # Generate markdown report
+          report_lines = ["## 📊 Benchmark Comparison Results", ""]
+          
+          if not significant:
+              report_lines.append("### ✅ All benchmarks within noise")
+              report_lines.append("")
+              report_lines.append(f"*{len(within_noise)} benchmarks compared, no significant changes detected.*")
+          else:
+              report_lines.extend([
+                  "| Status | Benchmark | Base | PR | Delta |",
+                  "|:------:|:----------|-----:|---:|:------|",
+              ])
+              
+              # Sort: regressions first (❌, ⚠️), then improvements (✅), then new/removed
+              status_order = {'❌': 0, '⚠️': 1, '✅': 2, '🆕': 3, '🗑️': 4}
+              significant.sort(key=lambda r: (status_order.get(r['status'], 5), -abs(r['pct_change'])))
+              
+              for r in significant:
+                  report_lines.append(
+                      f"| {r['status']} | `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+                  )
+              
+              report_lines.extend([
+                  "",
+                  "<details>",
+                  f"<summary>➖ {len(within_noise)} benchmarks within noise (click to expand)</summary>",
+                  "",
+                  "| Benchmark | Base | PR | Delta |",
+                  "|:----------|-----:|---:|:------|",
+              ])
+              for r in within_noise:
+                  report_lines.append(
+                      f"| `{r['name']}` | {r['base_time']} | {r['pr_time']} | {r['delta']} |"
+                  )
+              report_lines.extend(["", "</details>"])
+
+          report_lines.extend([
+              "",
+              "**Legend:** ✅ Faster (>5%) · ⚠️ Slower (5-30%) · ❌ Regression (>30%) · 🆕 New · 🗑️ Removed",
+          ])
+
+          if has_severe_regression:
+              report_lines.extend([
+                  "",
+                  "---",
+                  "⛔ **This PR has severe performance regressions (>20% slower).** Please investigate before merging.",
+              ])
+
+          report = '\n'.join(report_lines)
+          
+          # Write report to file for the comment action
+          with open('benchmark-report.md', 'w') as f:
+              f.write(report)
+
+          # Set outputs using GitHub Actions environment files
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"has_regression={'true' if has_severe_regression else 'false'}\n")
+
+          # Print report to console
+          print(report)
+          
+          EOF
+
+      - name: Find existing comment
+        uses: peter-evans/find-comment@v3
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '📊 Benchmark Comparison Results'
+
+      - name: Create or update comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: benchmark-report.md
+          edit-mode: replace
+
+      - name: Fail on severe regression
+        if: steps.compare.outputs.has_regression == 'true'
+        run: |
+          echo "::error::Severe performance regression detected (>20% slower)"
+          exit 1
