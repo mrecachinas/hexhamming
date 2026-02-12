@@ -11,13 +11,13 @@ on:
 jobs:
   build-and-test:
     name: Testing with Python 3.${{ matrix.python_minor }} on Linux
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         python_minor: [ "6" , "7" , "8" , "9" , "10" ]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -38,10 +38,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
     name: Source distribution
-    runs-on: macos-11
+    runs-on: macos-13
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4.2.2
     - name: Install requirements
       run: |
         pip3 install --user check-manifest twine
@@ -61,7 +61,7 @@ jobs:
       run: python3 -m twine check wheelhouse/*
 
     - name: Upload sdist
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4.4.3
       with:
         name: wheels
         path: wheelhouse/*.tar.gz
@@ -70,7 +70,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
-    runs-on: macos-11
+    runs-on: macos-13
     strategy:
       fail-fast: true
       matrix:
@@ -78,7 +78,7 @@ jobs:
         cibw_arch: [ "x86_64", "arm64" ]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4.2.2
     - name: Install cibuildwheel
       run: |
         python3 -m pip install --upgrade pip
@@ -107,7 +107,7 @@ jobs:
       run: twine check wheelhouse/*
 
     - name: Upload built wheels
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4.4.3
       with:
         name: wheels
         path: wheelhouse/*.whl
@@ -117,7 +117,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: true
       matrix:
@@ -125,10 +125,10 @@ jobs:
         cibw_arch: [ "x86_64", "aarch64" ]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Set up QEMU
         if: matrix.cibw_arch == 'aarch64'
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@v3.2.0
         with:
           platforms: arm64
 
@@ -150,7 +150,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -160,10 +160,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build Windows wheels
-    runs-on: windows-2019
+    runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Install cibuildwheel
         run: |
           python3 -m pip install --upgrade pip
@@ -182,7 +182,7 @@ jobs:
         run: twine check wheelhouse/*
 
       - name: Upload built wheels
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4.4.3
         with:
           name: wheels
           path: wheelhouse/*.whl
@@ -192,11 +192,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [wheels_macos, wheels_linux, wheels_windows]
     name: Publish wheels
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
     - name: Collect sdist and wheels
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v4.1.8
       with:
         name: wheels
         path: wheelhouse

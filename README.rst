@@ -109,7 +109,7 @@ Using ``hexhamming`` is as simple as
     >>> hamming_distance_string("deadbeef", "00000000")
     24
 
-**New in v2.0.0** : ``hexhamming`` now supports `byte`s via ``hamming_distance_bytes``.
+**New in v2.0.0** : ``hexhamming`` now supports ``byte``s via ``hamming_distance_bytes``.
 You use it in the exact same way as before, except you pass in a byte string.
 
 ::
@@ -121,18 +121,20 @@ You use it in the exact same way as before, except you pass in a byte string.
 
 We also provide a method for a quick boolean check of whether two hexadecimal strings
 are within a given Hamming distance.
+
 ::
+
     >>> from hexhamming import check_hexstrings_within_dist
     >>> check_hexstrings_within_dist("ffff", "fffe", 2)
     True
     >>> check_hexstrings_within_dist("ffff", "0000", 2)
     False
-	
-Similarly, ``hexhamming`` supports a quick byte array check via ``check_bytes_within_dist``, which has
-a similar API as ``check_hexstrings_within_dist``, except it expects a bytes array. 
 
-The API described above is targeted at comparing two individual records and calculate their hamming distance quickly.
-For many applications the goal is compare a given record to an array of other records and to find out if there 
+Similarly, ``hexhamming`` supports a quick byte array check via ``check_bytes_within_dist``, which has
+a similar API as ``check_hexstrings_within_dist``, except it expects a bytes array.
+
+The API described above is targeted at comparing two individual records and calculating their hamming distance quickly.
+For many applications the goal is to compare a given record to an array of other records and to find out if there
 are elements in the array that are within a given hamming distance of the search record. To support these application
 cases ``hexhamming`` has a set of array APIs. Given that these operations are often speed critical and require preparing data
 anyway, they are only available for bytes strings, not for hex strings.
@@ -152,7 +154,7 @@ There are three functions that return different results, depending on what is ne
     1
 
 
-``check_bytes_arrays_best_within_dist`` returns a tuple with the distance and the index of the element that has the lowest hamming 
+``check_bytes_arrays_best_within_dist`` returns a tuple with the distance and the index of the element that has the lowest hamming
 distance less than ``max_dist``, or ``(-1,-1)`` if none do.
 
 ::
@@ -160,12 +162,12 @@ distance less than ``max_dist``, or ``(-1,-1)`` if none do.
     >>> from hexhamming import check_bytes_arrays_best_within_dist
     >>> check_bytes_arrays_best_within_dist(b"\xaa\xaa\xbb\xbb\xcc\xcc\xdd\xdd\xee\xee\xff\xff", b"\xff\xff", 4)
     (0, 5)
-	
-	>>> check_bytes_arrays_best_within_dist(b"\xaa\xaa\xbb\xbb\xcc\xcc\xdd\xdd\xee\xee\xff\xff", b"\xef\xfe", 4)	
-	(2, 4)
+
+    >>> check_bytes_arrays_best_within_dist(b"\xaa\xaa\xbb\xbb\xcc\xcc\xdd\xdd\xee\xee\xff\xff", b"\xef\xfe", 4)
+    (2, 4)
 
 
-``check_bytes_arrays_all_within_dist`` returns a  list of tuples with the distance and the index of the element that have a hamming 
+``check_bytes_arrays_all_within_dist`` returns a list of tuples with the distance and the index of the element that have a hamming
 distance less than ``max_dist``, or ``[]`` if none do.
 
 ::
@@ -177,7 +179,6 @@ distance less than ``max_dist``, or ``[]`` if none do.
 
 Tip: When you're assembling the long array of records to compare against, don't concatenate the different ``bytes`` together. As they're
 immutable that is a very slow operation. Use a ``bytearray`` instead, and cast it to ``bytes`` at the end. See https://www.guyrutenberg.com/2020/04/04/fast-bytes-concatenation-in-python/ for more info and tests.
-
 
 Benchmark
 ---------

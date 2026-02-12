@@ -341,7 +341,7 @@ static PyObject * check_bytes_arrays_first_within_dist_wrapper(PyObject *self, P
  * Python interface for `check_bytes_arrays_best_within_dist`
  *
  * @param self      Python `self` object
- * @param args      Python arguments for `check_bytes_arrays_first_within_dist` interface
+ * @param args      Python arguments for `check_bytes_arrays_best_within_dist` interface
  *                  - `array_of_elems` - bytes
  *                  - `elem_to_compare` - bytes
  *                  - `max_dist` - int64
