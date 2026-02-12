@@ -11,7 +11,7 @@ on:
 jobs:
   build-and-test:
     name: Testing with Python 3.${{ matrix.python_minor }} on Linux
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         python_minor: [ "6" , "7" , "8" , "9" , "10" ]
@@ -38,7 +38,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
     name: Source distribution
-    runs-on: macos-11
+    runs-on: macos-13
 
     steps:
     - uses: actions/checkout@v4.2.2
@@ -70,7 +70,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
-    runs-on: macos-11
+    runs-on: macos-13
     strategy:
       fail-fast: true
       matrix:
@@ -117,7 +117,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: true
       matrix:
@@ -160,7 +160,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [build-and-test, sdist]
     name: Build Windows wheels
-    runs-on: windows-2019
+    runs-on: windows-2022
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -192,7 +192,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags')
     needs: [wheels_macos, wheels_linux, wheels_windows]
     name: Publish wheels
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
     - name: Collect sdist and wheels
