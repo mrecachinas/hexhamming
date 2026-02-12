@@ -41,7 +41,7 @@ setup(
             name="hexhamming",
             sources=["hexhamming/python_hexhamming.cc"],
             extra_compile_args=extra_compile_args,
-            language="c++11",
+            language="c++",
         )
     ],
     author="Michael Recachinas",
