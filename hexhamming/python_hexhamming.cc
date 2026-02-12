@@ -274,7 +274,7 @@ static PyObject * check_bytes_within_dist_wrapper(PyObject *self, PyObject *args
     
     int64_t result;
     result = ptr__hamming_distance_bytes(array_1, array_2, array_2_size, max_dist);
-		
+        
     return Py_BuildValue("O", result == 1 ? Py_True : Py_False);
 }
 
@@ -318,12 +318,12 @@ static PyObject * check_bytes_arrays_first_within_dist_wrapper(PyObject *self, P
     }
 
     int64_t ret = -1;
-	
+    
     Py_BEGIN_ALLOW_THREADS
-	
+    
     uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
-	uint64_t res;
+    uint64_t res;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
         res = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist);
         if (res == 1){
@@ -331,9 +331,9 @@ static PyObject * check_bytes_arrays_first_within_dist_wrapper(PyObject *self, P
             break;
         }
     }
-	
+    
     Py_END_ALLOW_THREADS
-	
+    
     return Py_BuildValue("i", ret);
 }
 
@@ -385,20 +385,22 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
     uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+        if (ptr__hamming_distance_bytes(pBig, small_array, small_array_size, best_dist - 1) == 0)
+            continue;
         dist = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, -1);
         if (dist < best_dist) {
             best_dist = dist;
             best_index = i;
         }
     }
-	
+
     // Anything found? If not, set dist to -1
     if (best_index == -1) {
         best_dist = -1;
     }
-	
+    
     Py_END_ALLOW_THREADS
-	
+    
     return Py_BuildValue("ii", best_dist, best_index);
 }
 
@@ -450,38 +452,48 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
     uint64_t dist;
     uint8_t* pBig = big_array;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
+        if (ptr__hamming_distance_bytes(pBig, small_array, small_array_size, max_dist) == 0)
+            continue;
         dist = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, -1);
-        if (dist <= max_dist) {
-            *o++ = dist;
-            *o++ = i;
-        }
+        *o++ = dist;
+        *o++ = i;
     }
-	
+    
     Py_END_ALLOW_THREADS
-	
+    
     /* Assemble result... */
     PyObject *my_list = PyList_New(0);
-    if ( my_list == NULL )  
+    if (my_list == NULL)
     {
+        delete[] out;
         PyErr_NoMemory();
+        return NULL;
     }
-	
+
     for (uint64_t *op = out; op < o; op += 2)
     {
         PyObject *tup = Py_BuildValue("ii", op[0], op[1]);
         if (tup == NULL)
         {
+            delete[] out;
+            Py_DECREF(my_list);
             PyErr_NoMemory();
+            return NULL;
         }
-		
-        if(PyList_Append(my_list, tup) == -1) 
+
+        if (PyList_Append(my_list, tup) == -1)
         {
+            delete[] out;
+            Py_DECREF(tup);
+            Py_DECREF(my_list);
             PyErr_NoMemory();
+            return NULL;
         }
+        Py_DECREF(tup);
     }
-	
-    delete [] out;
-	
+
+    delete[] out;
+
     return my_list;
 }
 
@@ -669,7 +681,7 @@ static PyMethodDef CompareMethods[] = {
     {"check_bytes_arrays_best_within_dist", check_bytes_arrays_best_within_dist_wrapper, METH_VARARGS, check_bytes_arrays_best_within_dist_docstring},
     {"check_bytes_arrays_all_within_dist", check_bytes_arrays_all_within_dist_wrapper, METH_VARARGS, check_bytes_arrays_all_within_dist_docstring},
     {"set_algo", set_algo_wrapper, METH_VARARGS, set_algo_docstring},
-	/* Alias for backwards compatibility */
+    /* Alias for backwards compatibility */
     {"check_bytes_arrays_within_dist", check_bytes_arrays_first_within_dist_wrapper, METH_VARARGS, check_bytes_arrays_first_within_dist_docstring},
     {NULL, NULL, 0, NULL}
 };
