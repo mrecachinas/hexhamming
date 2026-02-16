@@ -1,6 +1,6 @@
 [package]
 name = "hexhamming"
-version = "2.2.3"
+version = "2.4.0"
 edition = "2021"
 description = "Fast Hamming distance calculation for hexadecimal strings"
 license = "MIT"

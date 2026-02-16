@@ -1430,8 +1430,7 @@ mod python {
     /// but optimized using SIMD instructions where available.
     #[pyfunction]
     #[pyo3(signature = (a, b))]
-    fn hamming_distance_string(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
-    // Extract strings with proper error handling
+    fn hamming_distance_string(py: Python<'_>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
     let a_str: &str = a.extract().map_err(|_| {
         PyValueError::new_err("error occurred while parsing arguments")
     })?;
@@ -1447,15 +1446,17 @@ mod python {
         return Ok(0);
     }
 
-    hamming_distance_string_dispatch(a_str.as_bytes(), b_str.as_bytes())
-        .map_err(PyValueError::new_err)
+    let a_owned = a_str.as_bytes().to_vec();
+    let b_owned = b_str.as_bytes().to_vec();
+    py.allow_threads(move || {
+        hamming_distance_string_dispatch(&a_owned, &b_owned)
+    }).map_err(PyValueError::new_err)
 }
 
 /// Calculate the hamming distance of two byte arrays
 #[pyfunction]
 #[pyo3(signature = (a, b))]
-fn hamming_distance_bytes(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
-    // Extract bytes with proper error handling
+fn hamming_distance_bytes(py: Python<'_>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
     let a_bytes: &[u8] = a.extract().map_err(|_| {
         PyValueError::new_err("error occurred while parsing arguments")
     })?;
@@ -1471,7 +1472,11 @@ fn hamming_distance_bytes(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResul
         return Ok(0);
     }
 
-    Ok(hamming_distance_bytes_dispatch(a_bytes, b_bytes, -1))
+    let a_owned = a_bytes.to_vec();
+    let b_owned = b_bytes.to_vec();
+    Ok(py.allow_threads(move || {
+        hamming_distance_bytes_dispatch(&a_owned, &b_owned, -1)
+    }))
 }
 
 /// Check if two hex strings are within a specified Hamming distance
@@ -1573,42 +1578,68 @@ fn check_hexstrings_within_dist(
     Ok(true)
 }
 
-/// Macro for zero-overhead array scanning loop
-/// Duplicates loop body for each algorithm to eliminate ALL call overhead
-macro_rules! array_scan_loop {
-    ($big_array:expr, $elem_size:expr, $num_elements:expr, $small_array:expr, $max_dist:expr, $hamming_call:expr) => {{
-        // Raw pointer arithmetic like C++ for zero-overhead iteration
-        let big_ptr = $big_array.as_ptr();
-        let elem_size = $elem_size;
-        let num_elements = $num_elements;
-        let max_dist = $max_dist;
-        let mut i: usize = 0;
-        
-        while i < num_elements {
-            // SAFETY: We've verified big_array.len() is a multiple of elem_size
-            let chunk = unsafe { std::slice::from_raw_parts(big_ptr.add(i * elem_size), elem_size) };
-            
-            if $hamming_call(chunk, $small_array, max_dist) == 1 {
-                return Ok(i as i64);
-            }
-            
-            i += 1;
-        }
-        
-        Ok(-1i64)
-    }};
+/// Check if two byte arrays are within a specified Hamming distance
+/// Returns True if distance <= max_dist, False otherwise
+#[pyfunction]
+#[pyo3(signature = (a, b, max_dist))]
+fn check_bytes_within_dist(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    max_dist: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let a_bytes: &[u8] = a.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let b_bytes: &[u8] = b.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let max_dist_val: i64 = max_dist.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+
+    if a_bytes.is_empty() || b_bytes.is_empty() {
+        return Err(PyValueError::new_err("array size must be >0"));
+    }
+    if max_dist_val < 0 {
+        return Err(PyValueError::new_err("`max_dist` must be >=0"));
+    }
+    if a_bytes.len() != b_bytes.len() {
+        return Err(PyValueError::new_err("array sizes need to be the same"));
+    }
+
+    let a_owned = a_bytes.to_vec();
+    let b_owned = b_bytes.to_vec();
+    let result = py.allow_threads(move || {
+        hamming_distance_bytes_dispatch(&a_owned, &b_owned, max_dist_val)
+    });
+    Ok(result == 1)
 }
 
 /// Check if any element of byte array is within a specified Hamming Distance
 /// and return its index or -1 otherwise.
+/// (Legacy name, equivalent to check_bytes_arrays_first_within_dist)
 #[pyfunction]
 #[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
 fn check_bytes_arrays_within_dist(
+    py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: &Bound<'_, PyAny>,
 ) -> PyResult<i64> {
-    // Extract bytes with proper error handling
+    check_bytes_arrays_first_within_dist(py, array_of_elems, elem_to_compare, max_dist)
+}
+
+/// Check if any element of byte array is within a specified Hamming Distance
+/// and return the index of the first match, or -1 otherwise.
+#[pyfunction]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+fn check_bytes_arrays_first_within_dist(
+    py: Python<'_>,
+    array_of_elems: &Bound<'_, PyAny>,
+    elem_to_compare: &Bound<'_, PyAny>,
+    max_dist: &Bound<'_, PyAny>,
+) -> PyResult<i64> {
     let big_array: &[u8] = array_of_elems.extract().map_err(|_| {
         PyValueError::new_err("error occurred while parsing arguments")
     })?;
@@ -1622,60 +1653,139 @@ fn check_bytes_arrays_within_dist(
     if small_array.is_empty() {
         return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
     }
-
     if max_dist_val < 0 {
         return Err(PyValueError::new_err("`max_dist` must be >=0"));
     }
-
     if big_array.len() % small_array.len() != 0 {
         return Err(PyValueError::new_err(
             "`array_of_elems` size must be multiplier of `elem_to_compare`",
         ));
     }
 
-    let elem_size = small_array.len();
-    let num_elements = big_array.len() / elem_size;
-
-    // Resolve algorithm ONCE outside the loop (like C++ function pointer)
-    // Each arm has its own inlined loop - no function pointer/closure overhead
-    let algo = CURRENT_ALGO.load(Ordering::Relaxed);
-
-    match algo {
-        ALGO_CLASSIC => {
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                hamming_distance_bytes_classic)
+    let big_owned = big_array.to_vec();
+    let small_owned = small_array.to_vec();
+    let result = py.allow_threads(move || {
+        let elem_size = small_owned.len();
+        let num_elements = big_owned.len() / elem_size;
+        for i in 0..num_elements {
+            let chunk = &big_owned[i * elem_size..(i + 1) * elem_size];
+            if hamming_distance_bytes_dispatch(chunk, &small_owned, max_dist_val) == 1 {
+                return i as i64;
+            }
         }
+        -1i64
+    });
+    Ok(result)
+}
 
-        #[cfg(target_arch = "x86_64")]
-        ALGO_AVX512 if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") => {
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_avx512(a, b, m) })
-        }
+/// Find the element in byte array with the smallest Hamming distance
+/// Returns (best_distance, best_index), or (-1, -1) if none found within max_dist
+#[pyfunction]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+fn check_bytes_arrays_best_within_dist(
+    py: Python<'_>,
+    array_of_elems: &Bound<'_, PyAny>,
+    elem_to_compare: &Bound<'_, PyAny>,
+    max_dist: &Bound<'_, PyAny>,
+) -> PyResult<(i64, i64)> {
+    let big_array: &[u8] = array_of_elems.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let small_array: &[u8] = elem_to_compare.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let max_dist_val: i64 = max_dist.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
 
-        #[cfg(target_arch = "x86_64")]
-        ALGO_AVX2 if is_x86_feature_detected!("avx2") => {
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, m) })
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        ALGO_SSE41 if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("popcnt") => {
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_sse(a, b, m) })
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        ALGO_NEON => {
-            // NEON now uses native count_ones() which auto-vectorizes well on ARM64
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                hamming_distance_bytes_native)
-        }
-
-        _ => {
-            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
-                hamming_distance_bytes_native)
-        }
+    if small_array.is_empty() {
+        return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
     }
+    if max_dist_val < 0 {
+        return Err(PyValueError::new_err("`max_dist` must be >=0"));
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err(PyValueError::new_err(
+            "`array_of_elems` size must be multiplier of `elem_to_compare`",
+        ));
+    }
+
+    let big_owned = big_array.to_vec();
+    let small_owned = small_array.to_vec();
+    let result = py.allow_threads(move || {
+        let elem_size = small_owned.len();
+        let num_elements = big_owned.len() / elem_size;
+        let mut best_dist: i64 = -1;
+        let mut best_index: i64 = -1;
+
+        for i in 0..num_elements {
+            let chunk = &big_owned[i * elem_size..(i + 1) * elem_size];
+            // Use current best as threshold for early termination, or max_dist if no match yet
+            let threshold = if best_dist >= 0 { best_dist - 1 } else { max_dist_val };
+            if hamming_distance_bytes_dispatch(chunk, &small_owned, threshold) == 0 {
+                continue;
+            }
+            let dist = hamming_distance_bytes_dispatch(chunk, &small_owned, -1) as i64;
+            if best_dist < 0 || dist < best_dist {
+                best_dist = dist;
+                best_index = i as i64;
+            }
+        }
+        (best_dist, best_index)
+    });
+    Ok(result)
+}
+
+/// Find all elements in byte array within a specified Hamming distance
+/// Returns list of (distance, index) tuples
+#[pyfunction]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+fn check_bytes_arrays_all_within_dist(
+    py: Python<'_>,
+    array_of_elems: &Bound<'_, PyAny>,
+    elem_to_compare: &Bound<'_, PyAny>,
+    max_dist: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(u64, u64)>> {
+    let big_array: &[u8] = array_of_elems.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let small_array: &[u8] = elem_to_compare.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+    let max_dist_val: i64 = max_dist.extract().map_err(|_| {
+        PyValueError::new_err("error occurred while parsing arguments")
+    })?;
+
+    if small_array.is_empty() {
+        return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
+    }
+    if max_dist_val < 0 {
+        return Err(PyValueError::new_err("`max_dist` must be >=0"));
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err(PyValueError::new_err(
+            "`array_of_elems` size must be multiplier of `elem_to_compare`",
+        ));
+    }
+
+    let big_owned = big_array.to_vec();
+    let small_owned = small_array.to_vec();
+    let results = py.allow_threads(move || {
+        let elem_size = small_owned.len();
+        let num_elements = big_owned.len() / elem_size;
+        let mut out: Vec<(u64, u64)> = Vec::new();
+
+        for i in 0..num_elements {
+            let chunk = &big_owned[i * elem_size..(i + 1) * elem_size];
+            if hamming_distance_bytes_dispatch(chunk, &small_owned, max_dist_val) == 0 {
+                continue;
+            }
+            let dist = hamming_distance_bytes_dispatch(chunk, &small_owned, -1);
+            out.push((dist, i as u64));
+        }
+        out
+    });
+    Ok(results)
 }
 
 /// Change algorithm used for calculations
@@ -1757,11 +1867,15 @@ fn set_algo(algo_name: &str) -> PyResult<String> {
 /// Module for calculating hamming distance of two hexadecimal strings
 #[pymodule]
 fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", "2.2.3")?;
+    m.add("__version__", "2.4.0")?;
     m.add_function(wrap_pyfunction!(hamming_distance_string, m)?)?;
     m.add_function(wrap_pyfunction!(hamming_distance_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(check_hexstrings_within_dist, m)?)?;
+    m.add_function(wrap_pyfunction!(check_bytes_within_dist, m)?)?;
     m.add_function(wrap_pyfunction!(check_bytes_arrays_within_dist, m)?)?;
+    m.add_function(wrap_pyfunction!(check_bytes_arrays_first_within_dist, m)?)?;
+    m.add_function(wrap_pyfunction!(check_bytes_arrays_best_within_dist, m)?)?;
+    m.add_function(wrap_pyfunction!(check_bytes_arrays_all_within_dist, m)?)?;
     m.add_function(wrap_pyfunction!(set_algo, m)?)?;
 
     // Auto-detect best algorithm on module load
