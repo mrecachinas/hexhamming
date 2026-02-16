@@ -739,8 +739,9 @@ mod x86_simd {
     pub unsafe fn hamming_distance_string_avx512(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
         let length = a.len();
 
-        if length < 64 {
-            return hamming_distance_string_avx2(a, b);
+        // With masked loads, we can handle any length efficiently
+        if length < 16 {
+            return hamming_distance_string_classic(a, b);
         }
 
         let fifteen = _mm512_set1_epi8(15);
@@ -790,9 +791,34 @@ mod x86_simd {
         let sad = _mm512_sad_epu8(total, zero);
         let mut difference = _mm512_reduce_add_epi64(sad) as u64;
 
-        // Fall through to AVX2/SSE for remaining < 64 chars
-        if i < length {
-            difference += hamming_distance_string_avx2(&a[i..], &b[i..])?;
+        // Handle remaining chars with masked AVX-512 load (no fallthrough)
+        let remaining = length - i;
+        if remaining > 0 {
+            let mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let a_tail = _mm512_maskz_loadu_epi8(mask, a.as_ptr().add(i) as *const i8);
+            let b_tail = _mm512_maskz_loadu_epi8(mask, b.as_ptr().add(i) as *const i8);
+
+            let a_nib = hex_parse_avx512(a_tail, case_mask, ascii_0, seven, nine, ten);
+            let b_nib = hex_parse_avx512(b_tail, case_mask, ascii_0, seven, nine, ten);
+
+            // Validate only the active lanes
+            let invalid = (_mm512_cmpgt_epi8_mask(a_nib, fifteen)
+                | _mm512_cmpgt_epi8_mask(b_nib, fifteen)
+                | _mm512_cmpgt_epi8_mask(zero, a_nib)
+                | _mm512_cmpgt_epi8_mask(zero, b_nib))
+                & mask;
+            if invalid != 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            let xor = _mm512_xor_si512(a_nib, b_nib);
+            let cnt = _mm512_popcnt_epi8(xor);
+            let sad = _mm512_sad_epu8(cnt, zero);
+            difference += _mm512_reduce_add_epi64(sad) as u64;
         }
 
         Ok(difference)
@@ -841,10 +867,16 @@ mod x86_simd {
 
             let mut difference = _mm512_reduce_add_epi64(total) as u64;
 
-            // Scalar tail
-            while i < length {
-                difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
-                i += 1;
+            // Masked tail — no scalar fallback
+            let remaining = length - i;
+            if remaining > 0 {
+                let mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                let a_tail = _mm512_maskz_loadu_epi8(mask, a.as_ptr().add(i) as *const i8);
+                let b_tail = _mm512_maskz_loadu_epi8(mask, b.as_ptr().add(i) as *const i8);
+                let xor = _mm512_xor_si512(a_tail, b_tail);
+                let cnt = _mm512_popcnt_epi8(xor);
+                let sad = _mm512_sad_epu8(cnt, zero);
+                difference += _mm512_reduce_add_epi64(sad) as u64;
             }
             difference
         } else {
@@ -865,12 +897,19 @@ mod x86_simd {
                 i += 64;
             }
 
-            while i < length {
-                difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+            // Masked tail for early termination path
+            let remaining = length - i;
+            if remaining > 0 {
+                let mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                let a_tail = _mm512_maskz_loadu_epi8(mask, a.as_ptr().add(i) as *const i8);
+                let b_tail = _mm512_maskz_loadu_epi8(mask, b.as_ptr().add(i) as *const i8);
+                let xor = _mm512_xor_si512(a_tail, b_tail);
+                let cnt = _mm512_popcnt_epi8(xor);
+                let sad = _mm512_sad_epu8(cnt, zero);
+                difference += _mm512_reduce_add_epi64(sad) as u64;
                 if difference > max_dist_u64 {
                     return 0;
                 }
-                i += 1;
             }
             1
         }
