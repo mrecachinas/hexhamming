@@ -554,6 +554,159 @@ mod x86_simd {
         }
     }
 
+    /// Branchless vectorized hex ASCII → nibble conversion for AVX2.
+    /// Same subtract-and-correct strategy as SSE/NEON, but on 32 lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn hex_parse_avx2(
+        chars: __m256i,
+        case_mask: __m256i,
+        ascii_0: __m256i,
+        seven: __m256i,
+        nine: __m256i,
+        ten: __m256i,
+    ) -> __m256i {
+        let digit_val = _mm256_sub_epi8(chars, ascii_0);
+        let letter_val = _mm256_sub_epi8(_mm256_and_si256(chars, case_mask), ascii_0);
+        let is_letter = _mm256_cmpgt_epi8(digit_val, nine);
+        let adjusted = _mm256_sub_epi8(letter_val, seven);
+        let result = _mm256_blendv_epi8(digit_val, adjusted, is_letter);
+        let bad_letter = _mm256_and_si256(is_letter, _mm256_cmpgt_epi8(ten, adjusted));
+        _mm256_or_si256(result, bad_letter)
+    }
+
+    /// AVX2 pack-to-bytes implementation for hex strings.
+    /// Parses 64 hex chars (2×32) → nibbles, XORs, packs pairs into bytes,
+    /// then uses hardware popcnt on u64 extracts.
+    #[target_feature(enable = "avx2", enable = "popcnt")]
+    pub unsafe fn hamming_distance_string_avx2(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+        let length = a.len();
+
+        // Fall back to SSE for inputs < 64 chars
+        if length < 64 {
+            return hamming_distance_string_sse(a, b);
+        }
+
+        let zero = _mm256_setzero_si256();
+        let fifteen = _mm256_set1_epi8(15);
+        let case_mask = _mm256_set1_epi8(!0x20i8);     // 0xDF
+        let ascii_0 = _mm256_set1_epi8(b'0' as i8);
+        let seven = _mm256_set1_epi8(7);
+        let nine = _mm256_set1_epi8(9);
+        let ten = _mm256_set1_epi8(10);
+
+        let mut i = 0;
+        let mut difference: u64 = 0;
+
+        // Process 64 hex chars at a time: 2×32 chars → parse → XOR → pack → popcnt
+        while i + 64 <= length {
+            let a_lo = hex_parse_avx2(
+                _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_lo = hex_parse_avx2(
+                _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let a_hi = hex_parse_avx2(
+                _mm256_loadu_si256(a.as_ptr().add(i + 32) as *const __m256i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_hi = hex_parse_avx2(
+                _mm256_loadu_si256(b.as_ptr().add(i + 32) as *const __m256i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+
+            // Validate: any lane > 15 or < 0 (signed) means invalid
+            let invalid = _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpgt_epi8(a_lo, fifteen),
+                    _mm256_cmpgt_epi8(b_lo, fifteen),
+                ),
+                _mm256_or_si256(
+                    _mm256_cmpgt_epi8(a_hi, fifteen),
+                    _mm256_cmpgt_epi8(b_hi, fifteen),
+                ),
+            );
+            let negative = _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpgt_epi8(zero, a_lo),
+                    _mm256_cmpgt_epi8(zero, b_lo),
+                ),
+                _mm256_or_si256(
+                    _mm256_cmpgt_epi8(zero, a_hi),
+                    _mm256_cmpgt_epi8(zero, b_hi),
+                ),
+            );
+            let bad = _mm256_or_si256(invalid, negative);
+            if _mm256_testz_si256(bad, bad) == 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles
+            let xor_lo = _mm256_xor_si256(a_lo, b_lo);
+            let xor_hi = _mm256_xor_si256(a_hi, b_hi);
+
+            // Pack nibble pairs into bytes using VPSHUFB to deinterleave
+            let shuf_even = _mm256_setr_epi8(
+                0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+                0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+            );
+            let shuf_odd = _mm256_setr_epi8(
+                1, 3, 5, 7, 9, 11, 13, 15, -1, -1, -1, -1, -1, -1, -1, -1,
+                1, 3, 5, 7, 9, 11, 13, 15, -1, -1, -1, -1, -1, -1, -1, -1,
+            );
+
+            // AVX2 VPSHUFB operates within 128-bit lanes, so each 256-bit register
+            // gives us 8 even/odd bytes in low half of each 128-bit lane.
+            // We need to collect them: use _mm256_unpacklo_epi64 to merge within lanes,
+            // then _mm256_permute4x64_epi64 to consolidate across lanes.
+            let even_lo = _mm256_shuffle_epi8(xor_lo, shuf_even);
+            let odd_lo  = _mm256_shuffle_epi8(xor_lo, shuf_odd);
+            let even_hi = _mm256_shuffle_epi8(xor_hi, shuf_even);
+            let odd_hi  = _mm256_shuffle_epi8(xor_hi, shuf_odd);
+
+            // Merge: low 64 bits of each lane contain our data
+            // unpacklo_epi64 merges lo+hi within each 128-bit lane
+            let even_merged = _mm256_unpacklo_epi64(even_lo, even_hi);
+            let odd_merged  = _mm256_unpacklo_epi64(odd_lo, odd_hi);
+
+            // Consolidate: permute to put lane0_lo64, lane0_hi64, lane1_lo64, lane1_hi64
+            // into contiguous order. After unpacklo, layout is:
+            //   lane0: [even_lo_lane0_8B | even_hi_lane0_8B]
+            //   lane1: [even_lo_lane1_8B | even_hi_lane1_8B]
+            // We want: [even_lo_lane0 | even_hi_lane0 | even_lo_lane1 | even_hi_lane1]
+            // which is already the natural order: q0, q1, q2, q3 → permute 0,2,1,3
+            let even = _mm256_permute4x64_epi64(even_merged, 0b11_01_10_00); // 0,2,1,3
+            let odd  = _mm256_permute4x64_epi64(odd_merged, 0b11_01_10_00);
+
+            // Pack: (even << 4) | odd, with mask to prevent cross-byte leakage
+            let hi_nib_mask = _mm256_set1_epi8(0xF0u8 as i8);
+            let packed = _mm256_or_si256(
+                _mm256_and_si256(_mm256_slli_epi16(even, 4), hi_nib_mask),
+                odd,
+            );
+
+            // Hardware popcnt on 32 packed bytes (extract as four u64s)
+            let v128_lo = _mm256_castsi256_si128(packed);
+            let v128_hi = _mm256_extracti128_si256(packed, 1);
+            difference += (_mm_cvtsi128_si64(v128_lo) as u64).count_ones() as u64
+                + (_mm_extract_epi64(v128_lo, 1) as u64).count_ones() as u64
+                + (_mm_cvtsi128_si64(v128_hi) as u64).count_ones() as u64
+                + (_mm_extract_epi64(v128_hi, 1) as u64).count_ones() as u64;
+
+            i += 64;
+        }
+
+        // Fall through to SSE for remaining < 64 chars
+        if i < length {
+            let remaining = hamming_distance_string_sse(&a[i..], &b[i..])?;
+            difference += remaining;
+        }
+
+        Ok(difference)
+    }
+
     /// Branchless vectorized hex ASCII → nibble conversion for SSE4.1.
     /// Same subtract-and-correct strategy as the NEON version:
     ///   1. digit_val = c - '0': digits → 0-9
@@ -1012,6 +1165,12 @@ fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64, &'static 
     #[cfg(target_arch = "x86_64")]
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+        if (algo == ALGO_AVX2 || algo == ALGO_NATIVE)
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return unsafe { x86_simd::hamming_distance_string_avx2(a, b) };
+        }
         if (algo == ALGO_AVX2 || algo == ALGO_SSE41 || algo == ALGO_NATIVE)
             && is_x86_feature_detected!("sse4.1")
             && is_x86_feature_detected!("popcnt")
@@ -1457,20 +1616,43 @@ mod tests {
 
     #[test]
     fn test_long_strings_32plus() {
-        // 32 chars — exercises the pack/32-char loop
+        // 32 chars — exercises the SSE pack/32-char loop
         let a32 = "f".repeat(32);
         let b32 = "0".repeat(32);
         assert_eq!(hex_hamming_distance(&a32, &b32).unwrap(), 128);
 
-        // 64 chars
+        // 64 chars — exercises the AVX2 64-char loop
         let a64 = "f".repeat(64);
         let b64 = "0".repeat(64);
         assert_eq!(hex_hamming_distance(&a64, &b64).unwrap(), 256);
 
-        // 254 chars — exercises loop + tail
+        // 128 chars — multiple AVX2 iterations
+        let a128 = "f".repeat(128);
+        let b128 = "0".repeat(128);
+        assert_eq!(hex_hamming_distance(&a128, &b128).unwrap(), 512);
+
+        // 254 chars — AVX2 loop + SSE tail + scalar tail
         let a254 = "f".repeat(254);
         let b254 = "0".repeat(254);
         assert_eq!(hex_hamming_distance(&a254, &b254).unwrap(), 1016);
+    }
+
+    #[test]
+    fn test_long_mixed_content() {
+        // Mixed hex chars to exercise all parse paths across SIMD lanes
+        let a = "0123456789abcdef".repeat(8); // 128 chars
+        let b = "fedcba9876543210".repeat(8);
+        let result = hex_hamming_distance(&a, &b).unwrap();
+        // Each pair: 0^f=f(4), 1^e=f(4), 2^d=f(4), 3^c=f(4),
+        //            4^b=f(4), 5^a=f(4), 6^9=f(4), 7^8=f(4),
+        //            8^7=f(4), 9^6=f(4), a^5=f(4), b^4=f(4),
+        //            c^3=f(4), d^2=f(4), e^1=f(4), f^0=f(4) = 64 per 16 chars
+        assert_eq!(result, 64 * 8);
+
+        // Mixed case in long string
+        let a_mixed = "AaBbCcDdEeFf0011".repeat(4); // 64 chars
+        let b_mixed = "aAbBcCdDeEfF0011".repeat(4);
+        assert_eq!(hex_hamming_distance(&a_mixed, &b_mixed).unwrap(), 0);
     }
 
     #[test]
