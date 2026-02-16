@@ -1867,7 +1867,7 @@ fn set_algo(algo_name: &str) -> PyResult<String> {
 /// Module for calculating hamming distance of two hexadecimal strings
 #[pymodule]
 fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", "2.4.0")?;
+    m.add("__version__", "3.0.0")?;
     m.add_function(wrap_pyfunction!(hamming_distance_string, m)?)?;
     m.add_function(wrap_pyfunction!(hamming_distance_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(check_hexstrings_within_dist, m)?)?;
