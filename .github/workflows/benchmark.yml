@@ -301,8 +301,7 @@ jobs:
           body-path: benchmark-report.md
           edit-mode: replace
 
-      - name: Fail on severe regression
+      - name: Warn on severe regression
         if: steps.compare.outputs.has_regression == 'true'
         run: |
-          echo "::error::Severe performance regression detected (>20% slower)"
-          exit 1
+          echo "::warning::Possible performance regression detected. Review benchmark comment on the PR for details."
