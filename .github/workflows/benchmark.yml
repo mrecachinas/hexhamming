@@ -285,6 +285,7 @@ jobs:
 
       - name: Find existing comment
         uses: peter-evans/find-comment@v3
+        if: github.event.pull_request.head.repo.full_name == github.repository
         id: find-comment
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -293,6 +294,7 @@ jobs:
 
       - name: Create or update comment
         uses: peter-evans/create-or-update-comment@v4
+        if: github.event.pull_request.head.repo.full_name == github.repository
         with:
           comment-id: ${{ steps.find-comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
