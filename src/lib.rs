@@ -1943,6 +1943,95 @@ pub fn bytes_hamming_distance(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
     Ok(hamming_distance_bytes_dispatch(a, b, -1))
 }
 
+/// Check if two byte arrays are within a specified Hamming distance.
+///
+/// Returns `Ok(true)` if distance <= max_dist, `Ok(false)` otherwise.
+pub fn bytes_within_dist(a: &[u8], b: &[u8], max_dist: i64) -> Result<bool, &'static str> {
+    if a.is_empty() || b.is_empty() {
+        return Err("array size must be >0");
+    }
+    if a.len() != b.len() {
+        return Err("array sizes need to be the same");
+    }
+    Ok(hamming_distance_bytes_dispatch(a, b, max_dist) == 1)
+}
+
+/// Find the first element in a byte array within a specified Hamming distance.
+///
+/// Returns the index of the first matching element, or `None`.
+pub fn bytes_array_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Option<usize>, &'static str> {
+    if small_array.is_empty() {
+        return Err("elem_to_compare size must be >0");
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err("array_of_elems size must be multiplier of elem_to_compare");
+    }
+    let elem_size = small_array.len();
+    let num_elements = big_array.len() / elem_size;
+    for i in 0..num_elements {
+        let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
+        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) == 1 {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the element in a byte array with the smallest Hamming distance.
+///
+/// Returns `Some((distance, index))` of the best match, or `None` if none within max_dist.
+pub fn bytes_array_best_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Option<(u64, usize)>, &'static str> {
+    if small_array.is_empty() {
+        return Err("elem_to_compare size must be >0");
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err("array_of_elems size must be multiplier of elem_to_compare");
+    }
+    let elem_size = small_array.len();
+    let num_elements = big_array.len() / elem_size;
+    let mut best_dist: i64 = -1;
+    let mut best_index: Option<usize> = None;
+
+    for i in 0..num_elements {
+        let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
+        let threshold = if best_dist >= 0 { best_dist - 1 } else { max_dist };
+        if hamming_distance_bytes_dispatch(chunk, small_array, threshold) == 0 {
+            continue;
+        }
+        let dist = hamming_distance_bytes_dispatch(chunk, small_array, -1) as i64;
+        if best_dist < 0 || dist < best_dist {
+            best_dist = dist;
+            best_index = Some(i);
+        }
+    }
+    Ok(best_index.map(|idx| (best_dist as u64, idx)))
+}
+
+/// Find all elements in a byte array within a specified Hamming distance.
+///
+/// Returns a Vec of `(distance, index)` tuples.
+pub fn bytes_array_all_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Vec<(u64, usize)>, &'static str> {
+    if small_array.is_empty() {
+        return Err("elem_to_compare size must be >0");
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err("array_of_elems size must be multiplier of elem_to_compare");
+    }
+    let elem_size = small_array.len();
+    let num_elements = big_array.len() / elem_size;
+    let mut results = Vec::new();
+
+    for i in 0..num_elements {
+        let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
+        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) == 0 {
+            continue;
+        }
+        let dist = hamming_distance_bytes_dispatch(chunk, small_array, -1);
+        results.push((dist, i));
+    }
+    Ok(results)
+}
+
 /// Experimental: hex hamming distance using pack-to-bytes approach.
 /// Parses 32 hex chars → 16 packed bytes, then uses vcntq_u8.
 #[cfg(target_arch = "aarch64")]
