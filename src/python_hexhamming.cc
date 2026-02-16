@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstring>
 #include <string.h>
 #define PY_SSIZE_T_CLEAN
@@ -334,7 +335,7 @@ static PyObject * check_bytes_arrays_first_within_dist_wrapper(PyObject *self, P
     
     Py_END_ALLOW_THREADS
     
-    return Py_BuildValue("i", ret);
+    return Py_BuildValue("L", ret);
 }
 
 /**
@@ -376,7 +377,7 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
         return NULL;
     }
 
-    int64_t best_dist = max_dist + 1;
+    int64_t best_dist = -1;
     int64_t best_index = -1;
 
     Py_BEGIN_ALLOW_THREADS
@@ -385,23 +386,19 @@ static PyObject * check_bytes_arrays_best_within_dist_wrapper(PyObject *self, Py
     uint64_t number_of_elements = big_array_size / small_array_size;
     uint8_t* pBig = big_array;
     for (uint64_t i = 0; i < number_of_elements; i++, pBig += small_array_size) {
-        if (ptr__hamming_distance_bytes(pBig, small_array, small_array_size, best_dist - 1) == 0)
+        int64_t threshold = (best_dist >= 0) ? best_dist - 1 : max_dist;
+        if (ptr__hamming_distance_bytes(pBig, small_array, small_array_size, threshold) == 0)
             continue;
         dist = ptr__hamming_distance_bytes(pBig, small_array, small_array_size, -1);
-        if (dist < best_dist) {
+        if (best_dist < 0 || (int64_t)dist < best_dist) {
             best_dist = dist;
             best_index = i;
         }
     }
-
-    // Anything found? If not, set dist to -1
-    if (best_index == -1) {
-        best_dist = -1;
-    }
     
     Py_END_ALLOW_THREADS
     
-    return Py_BuildValue("ii", best_dist, best_index);
+    return Py_BuildValue("LL", best_dist, best_index);
 }
 
 /**
@@ -444,7 +441,11 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
     }
 
     uint64_t number_of_elements = big_array_size / small_array_size;
-    uint64_t *out = new uint64_t[number_of_elements * 2];
+    uint64_t *out = (uint64_t *)malloc(number_of_elements * 2 * sizeof(uint64_t));
+    if (out == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
     uint64_t *o = out;
 
     Py_BEGIN_ALLOW_THREADS
@@ -465,17 +466,17 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
     PyObject *my_list = PyList_New(0);
     if (my_list == NULL)
     {
-        delete[] out;
+        free(out);
         PyErr_NoMemory();
         return NULL;
     }
 
     for (uint64_t *op = out; op < o; op += 2)
     {
-        PyObject *tup = Py_BuildValue("ii", op[0], op[1]);
+        PyObject *tup = Py_BuildValue("KK", op[0], op[1]);
         if (tup == NULL)
         {
-            delete[] out;
+            free(out);
             Py_DECREF(my_list);
             PyErr_NoMemory();
             return NULL;
@@ -483,7 +484,7 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
 
         if (PyList_Append(my_list, tup) == -1)
         {
-            delete[] out;
+            free(out);
             Py_DECREF(tup);
             Py_DECREF(my_list);
             PyErr_NoMemory();
@@ -492,7 +493,7 @@ static PyObject * check_bytes_arrays_all_within_dist_wrapper(PyObject *self, PyO
         Py_DECREF(tup);
     }
 
-    delete[] out;
+    free(out);
 
     return my_list;
 }
