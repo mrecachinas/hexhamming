@@ -1,5 +1,11 @@
 include README.rst
+include LICENSE
 include pyproject.toml
 
 graft test
 graft src
+
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.so
+global-exclude __pycache__
