@@ -1,0 +1,239 @@
+// ARM64 NEON implementations
+
+use crate::classic::hamming_distance_string_classic;
+use crate::hex::hex_char_to_nibble;
+use crate::LOOKUP;
+
+use std::arch::aarch64::*;
+
+/// NEON vectorized hamming distance for hex strings.
+/// Processes 16 ASCII hex chars per iteration using:
+///   - vqtbl1q_u8 for branchless hex→nibble conversion
+///   - vcntq_u8 for parallel popcount
+///   - vpaddlq cascade for horizontal summation
+#[inline]
+pub unsafe fn hamming_distance_string_neon(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+    let length = a.len();
+
+    if length < 16 {
+        return hamming_distance_string_classic(a, b);
+    }
+
+    // Hex→nibble lookup table for vqtbl1q_u8 (indices 0-15 map ASCII
+    // low nibble to hex value; out-of-range produces 0xFF via saturation).
+    // We split into two ranges: digits ('0'-'9') and letters ('A'-'F'/'a'-'f').
+    //
+    // Strategy: mask to low nibble, use vqtbl1q as a 16-entry LUT.
+    // '0'(0x30)..'9'(0x39) have low nibbles 0x0..0x9 → identity
+    // 'A'(0x41)..'F'(0x46) have low nibbles 0x1..0x6 → +9
+    // 'a'(0x61)..'f'(0x66) have low nibbles 0x1..0x6 → +9
+    // We detect digit vs letter via range comparison.
+
+    let zero = vdupq_n_u8(0);
+    let fifteen_u = vdupq_n_u8(15);
+    let case_mask = vdupq_n_u8(0xDF); // clears bit 5 for case folding
+    let ascii_0 = vdupq_n_u8(b'0');
+    let seven = vdupq_n_u8(7);
+    let nine = vdupq_n_u8(9);
+    let ten = vdupq_n_u8(10);
+
+    // Popcount lookup table: popcnt[i] = number of 1-bits in i, for i in 0..15
+    let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
+
+    let mut i = 0usize;
+    let mut total = vdupq_n_u64(0);
+
+    // Process 64 chars at a time (4×16) to batch horizontal sums.
+    // Per-byte accumulator holds at most 4*4 = 16 < 255, safe for u8 lanes.
+    while i + 64 <= length {
+        let mut acc = zero;
+
+        for _ in 0..4 {
+            let a16 = vld1q_u8(a.as_ptr().add(i));
+            let b16 = vld1q_u8(b.as_ptr().add(i));
+
+            let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
+            let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
+
+            // Validate: any lane > 15 means invalid char (0xFF from failed parse)
+            let a_bad = vcgtq_u8(a_nib, fifteen_u);
+            let b_bad = vcgtq_u8(b_nib, fifteen_u);
+            let bad = vorrq_u8(a_bad, b_bad);
+            if vmaxvq_u8(bad) != 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles → popcount via table lookup (values are 0-15, only low nibble used)
+            let xor = veorq_u8(a_nib, b_nib);
+            let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+            acc = vaddq_u8(acc, cnt);
+
+            i += 16;
+        }
+
+        // Horizontal sum: u8→u16→u32→u64, add into total
+        total = vpadalq_u32(total, vpaddlq_u16(vpaddlq_u8(acc)));
+    }
+
+    // Process remaining 16-byte chunks
+    let mut acc = zero;
+    while i + 16 <= length {
+        let a16 = vld1q_u8(a.as_ptr().add(i));
+        let b16 = vld1q_u8(b.as_ptr().add(i));
+
+        let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
+        let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
+
+        let a_bad = vcgtq_u8(a_nib, fifteen_u);
+        let b_bad = vcgtq_u8(b_nib, fifteen_u);
+        let bad = vorrq_u8(a_bad, b_bad);
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+
+        let xor = veorq_u8(a_nib, b_nib);
+        let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+        acc = vaddq_u8(acc, cnt);
+
+        i += 16;
+    }
+    total = vpadalq_u32(total, vpaddlq_u16(vpaddlq_u8(acc)));
+
+    let mut result = vgetq_lane_u64(total, 0) + vgetq_lane_u64(total, 1);
+
+    // Scalar tail for remaining chars
+    while i < length {
+        let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+        let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+        if (val1 | val2) & 0xF0 != 0 {
+            return Err("hex string contains invalid char");
+        }
+        result += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        i += 1;
+    }
+
+    Ok(result)
+}
+
+/// Branchless vectorized hex ASCII → nibble (0-15) conversion.
+/// Invalid chars produce values > 15 (for easy detection by caller).
+///
+/// Strategy (7 NEON instructions):
+///   1. digit_val = c - '0': digits become 0-9
+///   2. letter_val = (c & 0xDF) - '0' - 7: letters become 10-15
+///   3. Select letter path where digit_val > 9
+///   4. Force invalid where letter result < 10 (catches '@', '`')
+#[inline(always)]
+unsafe fn hex_parse_neon(
+    chars: uint8x16_t,
+    case_mask: uint8x16_t,
+    ascii_0: uint8x16_t,
+    seven: uint8x16_t,
+    nine: uint8x16_t,
+    ten: uint8x16_t,
+) -> uint8x16_t {
+    let digit_val = vsubq_u8(chars, ascii_0);
+    let letter_val = vsubq_u8(vandq_u8(chars, case_mask), ascii_0);
+    let is_letter = vcgtq_u8(digit_val, nine);
+    let adjusted = vsubq_u8(letter_val, seven);
+    let result = vbslq_u8(is_letter, adjusted, digit_val);
+    // Force lanes invalid where letter path produced < 10 (e.g. '@' → 9)
+    let bad_letter = vandq_u8(is_letter, vcltq_u8(adjusted, ten));
+    vorrq_u8(result, bad_letter)
+}
+/// Alternative: parse 32 hex chars → pack into 16 bytes → use vcntq_u8.
+/// Processes 32 hex chars per iteration (vs 16 in the nibble approach),
+/// and replaces the vqtbl1q popcount lookup with the native vcntq_u8
+/// instruction which counts all 8 bits per byte in a single cycle.
+#[inline]
+pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+    let length = a.len();
+
+    if length < 32 {
+        return hamming_distance_string_neon(a, b);
+    }
+
+    let fifteen_u = vdupq_n_u8(15);
+    let case_mask = vdupq_n_u8(0xDF);
+    let ascii_0 = vdupq_n_u8(b'0');
+    let seven = vdupq_n_u8(7);
+    let nine = vdupq_n_u8(9);
+    let ten = vdupq_n_u8(10);
+    let four = vdupq_n_s8(4);
+
+    let mut i = 0usize;
+    let mut difference: u64 = 0;
+
+    // Process 32 hex chars at a time:
+    //   Load 32 chars (2×16), parse to nibbles, pack pairs into bytes,
+    //   XOR the packed bytes, vcntq_u8 popcount.
+    while i + 32 <= length {
+        // Parse first 16 hex chars → nibbles
+        let a_lo = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+        let b_lo = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+        // Parse next 16 hex chars → nibbles
+        let a_hi = hex_parse_neon(vld1q_u8(a.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
+        let b_hi = hex_parse_neon(vld1q_u8(b.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
+
+        // Validate all 4 vectors
+        let bad = vorrq_u8(
+            vorrq_u8(vcgtq_u8(a_lo, fifteen_u), vcgtq_u8(b_lo, fifteen_u)),
+            vorrq_u8(vcgtq_u8(a_hi, fifteen_u), vcgtq_u8(b_hi, fifteen_u)),
+        );
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+
+        // XOR nibbles first (before packing — same result, fewer packs)
+        let xor_lo = veorq_u8(a_lo, b_lo);  // 16 nibble XOR results
+        let xor_hi = veorq_u8(a_hi, b_hi);  // 16 nibble XOR results
+
+        // Pack: interleave even/odd nibbles into bytes
+        // xor_lo has nibbles [0,1,2,3,...,15], xor_hi has [16,17,...,31]
+        // We want bytes where each byte = (nibble[2k] << 4) | nibble[2k+1]
+        // Use UZP to deinterleave even/odd lanes, then shift+OR
+        let even_lo = vuzp1q_u8(xor_lo, xor_hi);  // even indices: 0,2,4,...
+        let odd_lo = vuzp2q_u8(xor_lo, xor_hi);   // odd indices: 1,3,5,...
+        // Shift even nibbles left 4 bits via reinterpret + signed shift
+        let packed = vorrq_u8(
+            vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
+            odd_lo,
+        );
+
+        // Now packed has 16 bytes, each containing two XOR'd nibbles
+        // vcntq_u8 counts all set bits per byte — exactly what we want
+        let cnt = vcntq_u8(packed);
+        // Horizontal sum
+        difference += vaddlvq_u8(cnt) as u64;
+
+        i += 32;
+    }
+
+    // Handle remaining chars with the nibble-based approach
+    while i + 16 <= length {
+        let a_nib = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+        let b_nib = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+        let bad = vorrq_u8(vcgtq_u8(a_nib, fifteen_u), vcgtq_u8(b_nib, fifteen_u));
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+        let xor = veorq_u8(a_nib, b_nib);
+        let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
+        let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+        difference += vaddlvq_u8(cnt) as u64;
+        i += 16;
+    }
+
+    // Scalar tail
+    while i < length {
+        let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+        let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+        if (val1 | val2) & 0xF0 != 0 {
+            return Err("hex string contains invalid char");
+        }
+        difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        i += 1;
+    }
+
+    Ok(difference)
+}
