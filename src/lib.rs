@@ -10,8 +10,6 @@
 //! - Unsafe bounds elimination in hot loops
 //! - Algorithm selection based on input size thresholds
 
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Lookup table for popcount of 4-bit values (0-15)
@@ -891,13 +889,21 @@ fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64, &'static 
     hamming_distance_string_classic(a, b)
 }
 
-/// Calculate the hamming distance of two hexadecimal strings
-///
-/// This is equivalent to `bin(int(a, 16) ^ int(b, 16)).count('1')`
-/// but optimized using SIMD instructions where available.
-#[pyfunction]
-#[pyo3(signature = (a, b))]
-fn hamming_distance_string(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
+// ─── Python bindings (only compiled with the "python" feature) ───────────
+
+#[cfg(feature = "python")]
+mod python {
+    use super::*;
+    use pyo3::exceptions::PyValueError;
+    use pyo3::prelude::*;
+
+    /// Calculate the hamming distance of two hexadecimal strings
+    ///
+    /// This is equivalent to `bin(int(a, 16) ^ int(b, 16)).count('1')`
+    /// but optimized using SIMD instructions where available.
+    #[pyfunction]
+    #[pyo3(signature = (a, b))]
+    fn hamming_distance_string(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<u64> {
     // Extract strings with proper error handling
     let a_str: &str = a.extract().map_err(|_| {
         PyValueError::new_err("error occurred while parsing arguments")
@@ -1228,4 +1234,49 @@ fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     Ok(())
+}
+} // mod python
+
+/// Calculate the bitwise hamming distance between two equal-length hex strings.
+///
+/// Automatically uses the best SIMD implementation available (NEON/AVX2/SSE4.1).
+///
+/// # Errors
+/// Returns `Err` if the strings differ in length or contain non-hex characters.
+///
+/// # Example
+/// ```
+/// let dist = hexhamming::hex_hamming_distance("deadbeef", "00000000").unwrap();
+/// assert_eq!(dist, 24);
+/// ```
+pub fn hex_hamming_distance(a: &str, b: &str) -> Result<u64, &'static str> {
+    if a.len() != b.len() {
+        return Err("strings are NOT the same length");
+    }
+    if a.is_empty() {
+        return Ok(0);
+    }
+    hamming_distance_string_dispatch(a.as_bytes(), b.as_bytes())
+}
+
+/// Calculate the bitwise hamming distance between two equal-length byte slices.
+///
+/// Automatically uses the best SIMD implementation available (NEON/AVX2/SSE4.1).
+///
+/// # Errors
+/// Returns `Err` if the slices differ in length.
+///
+/// # Example
+/// ```
+/// let dist = hexhamming::bytes_hamming_distance(b"\xff", b"\x00").unwrap();
+/// assert_eq!(dist, 8);
+/// ```
+pub fn bytes_hamming_distance(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+    if a.len() != b.len() {
+        return Err("bytes are NOT the same length");
+    }
+    if a.is_empty() {
+        return Ok(0);
+    }
+    Ok(hamming_distance_bytes_dispatch(a, b, -1))
 }
