@@ -57,33 +57,32 @@ In this case, I needed a hamming distance library that worked on hexadecimal
 strings (i.e., a Python ``str``) and performed blazingly fast.
 Furthermore, I often did not care about hex strings greater than 256 bits.
 That length constraint is different vs all the other libraries and enabled me
-to explore vectorization techniques via ``numba``, ``numpy``, and
-``SSE/AVX`` intrinsics.
+to explore vectorization techniques via ``SSE/AVX`` and ``NEON`` intrinsics.
 
 Lastly, I wanted to minimize dependencies, meaning you do not need to install
 ``numpy``, ``gmpy``, ``cython``, ``pypy``, ``pythran``, etc.
 
-Eventually, after playing around with ``gmpy.popcount``, ``numba.jit``,
-``pythran.run``, ``numpy``, I decided to write what I wanted
-in essentially raw C. At this point, I'm using raw ``char*`` and
-``int*``, so exploring re-writing this in Fortran makes little sense.
+As of v3.0.0, ``hexhamming`` is written in Rust using `PyO3 <https://pyo3.rs>`_
+and `maturin <https://www.maturin.rs>`_, providing memory safety, GIL release
+during computation, and free-threaded Python support while maintaining the same
+SIMD-accelerated performance (SSE4.1, AVX2, NEON).
 
 Installation
 -------------
 
-To install, ensure you have Python 3.6+. Run
+To install, ensure you have Python 3.10+. Run
 
 ::
 
     pip install hexhamming
 
-or to install from source
+or to install from source (requires Rust toolchain)
 
 ::
 
     git clone https://github.com/mrecachinas/hexhamming
     cd hexhamming
-    python setup.py install # or pip install .
+    pip install .
 
 If you want to contribute to hexhamming, you should install the dev
 dependencies
@@ -183,19 +182,45 @@ immutable that is a very slow operation. Use a ``bytearray`` instead, and cast i
 Benchmark
 ---------
 
-Below is a benchmark using ``pytest-benchmark`` with hexhamming==v1.3.2
-my 2020 2.0 GHz quad-core Intel Core i5 16 GB 3733 MHz LPDDR4 macOS Catalina (10.15.5)
-with Python 3.7.3 and Apple clang version 11.0.3 (clang-1103.0.32.62).
+Below is a benchmark using ``pytest-benchmark`` with hexhamming v3.0.0
+on Apple M-series (ARM64) with Python 3.14 and ``rustc`` 1.85.
 
-=======================================  ===========  ==========  =============  ========  ============
-Name                                       Mean (ns)    Std (ns)    Median (ns)    Rounds    Iterations
-=======================================  ===========  ==========  =============  ========  ============
-test_hamming_distance_bench_3                93.8        10.5          94.3         53268           200
-test_hamming_distance_bench_3_same           94.2        15.2          94.9        102146           100
-test_check_hexstrings_within_dist_bench      231.9      104.2         216.5        195122            22
-test_hamming_distance_bench_256              97.5        34.1          94.0        195122            22
-test_hamming_distance_bench_1000             489.8      159.4         477.5         94411            20
-test_hamming_distance_bench_1000_same        497.8       87.8         496.6         18971            20
-test_hamming_distance_bench_1024             509.9      299.5         506.7         18652            10
-test_hamming_distance_bench_1024_same        467.4      205.9         450.4        181819            10
-=======================================  ===========  ==========  =============  ========  ============
+String and bytes hamming distance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+======================================================  ===========  ==========
+Name                                                      Mean (ns)    Std (ns)
+======================================================  ===========  ==========
+hamming_distance_string [3 chars, same]                       48.8        10.1
+hamming_distance_string [3 chars, diff]                       48.4         4.4
+hamming_distance_string [64 chars, diff]                      88.2        16.0
+hamming_distance_string [1000 chars, same]                   754.7       251.2
+hamming_distance_string [1000 chars, diff]                   762.3        75.7
+hamming_distance_string [1024 chars, same]                   775.1        62.8
+hamming_distance_string [1024 chars, diff]                   785.0       137.1
+hamming_distance_bytes [3 bytes, same]                        48.5         5.5
+hamming_distance_bytes [3 bytes, diff]                        49.0         5.2
+hamming_distance_bytes [64 bytes, diff]                       50.3         8.4
+hamming_distance_bytes [1000 bytes, same]                     64.9         5.4
+hamming_distance_bytes [1000 bytes, diff]                     64.9        11.7
+hamming_distance_bytes [1024 bytes, same]                     63.2        35.3
+hamming_distance_bytes [1024 bytes, diff]                     69.1        16.0
+check_bytes_within_dist [16 bytes]                            52.1         8.9
+check_bytes_within_dist [64 bytes]                            51.2        23.2
+check_bytes_within_dist [127 bytes]                           53.4         5.3
+======================================================  ===========  ==========
+
+Array API (batch search)
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+===============================================================  =============  ============
+Name                                                               Mean (ns)      Std (ns)
+===============================================================  =============  ============
+first_within_dist [512 elems × 16B, match at start]                     70.0           6.3
+first_within_dist [512 elems × 16B, match at end]                      721.2          65.7
+first_within_dist [16384 elems × 64B, match at end]                 48,927.1       8,321.5
+best_within_dist [512 elems × 16B]                                     759.2         108.4
+best_within_dist [16384 elems × 64B]                                46,295.0       3,793.5
+all_within_dist [512 elems × 16B]                                      776.3          70.9
+all_within_dist [16384 elems × 64B]                                 46,602.1       2,944.3
+===============================================================  =============  ============
