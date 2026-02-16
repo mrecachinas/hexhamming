@@ -33,7 +33,7 @@ setup(
             name="hexhamming",
             sources=["src/python_hexhamming.cc"],
             extra_compile_args=extra_compile_args,
-            language="c++11",
+            language="c++",
         )
     ],
 )
