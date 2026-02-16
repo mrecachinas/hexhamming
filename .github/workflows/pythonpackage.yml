@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python_minor: [ "10" , "11" , "12" , "13" ]
+        python_minor: [ "10" , "11" , "12" , "13" , "14" ]
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        cibw_python: [ "cp310", "cp311", "cp312", "cp313" ]
+        cibw_python: [ "cp310", "cp311", "cp312", "cp313", "cp314" ]
         cibw_arch: [ "x86_64", "arm64" ]
 
     steps:
@@ -131,7 +131,7 @@ jobs:
       matrix:
         cibw_buildlinux: [ manylinux, musllinux ]
         cibw_arch: [ "x86_64", "aarch64" ]
-        cibw_python: [ "cp310", "cp311", "cp312", "cp313" ]
+        cibw_python: [ "cp310", "cp311", "cp312", "cp313", "cp314" ]
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -183,7 +183,7 @@ jobs:
       - name: 🛠 Build Hexhamming Python C extension
         run: cibuildwheel
         env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_TEST_REQUIRES: pytest pytest-benchmark
           CIBW_TEST_COMMAND: "pytest -s {project}/test"
