@@ -90,8 +90,8 @@ jobs:
     - uses: actions/checkout@v4.2.2
     - name: Install cibuildwheel
       run: |
-        python3 -m pip install --upgrade pip
-        python3 -m pip install cibuildwheel "twine>=6.1.0" "packaging>=24.2"
+        python3 -m pip install --break-system-packages --upgrade pip
+        python3 -m pip install --break-system-packages cibuildwheel "twine>=6.1.0" "packaging>=24.2"
 
     - name: 🛠 Build Hexhamming Python C extension
       run: cibuildwheel
