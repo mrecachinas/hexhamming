@@ -710,12 +710,11 @@ mod neon_simd {
 
         let zero = vdupq_n_u8(0);
         let fifteen_u = vdupq_n_u8(15);
-        let v_ascii_0 = vdupq_n_u8(b'0');
-        let v_ascii_9 = vdupq_n_u8(b'9');
-        let case_mask = vdupq_n_u8(!0x20u8); // 0xDF — clears bit 5 for case folding
-        let v_ascii_a = vdupq_n_u8(b'A');
-        let v_ascii_f = vdupq_n_u8(b'F');
-        let offset_letter = vdupq_n_u8(b'A' - 10); // 55
+        let case_mask = vdupq_n_u8(0xDF); // clears bit 5 for case folding
+        let ascii_0 = vdupq_n_u8(b'0');
+        let seven = vdupq_n_u8(7);
+        let nine = vdupq_n_u8(9);
+        let ten = vdupq_n_u8(10);
 
         // Popcount lookup table: popcnt[i] = number of 1-bits in i, for i in 0..15
         let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
@@ -732,8 +731,8 @@ mod neon_simd {
                 let a16 = vld1q_u8(a.as_ptr().add(i));
                 let b16 = vld1q_u8(b.as_ptr().add(i));
 
-                let a_nib = hex_parse_neon(a16, v_ascii_0, v_ascii_9, case_mask, v_ascii_a, v_ascii_f, offset_letter);
-                let b_nib = hex_parse_neon(b16, v_ascii_0, v_ascii_9, case_mask, v_ascii_a, v_ascii_f, offset_letter);
+                let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
+                let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
 
                 // Validate: any lane > 15 means invalid char (0xFF from failed parse)
                 let a_bad = vcgtq_u8(a_nib, fifteen_u);
@@ -761,8 +760,8 @@ mod neon_simd {
             let a16 = vld1q_u8(a.as_ptr().add(i));
             let b16 = vld1q_u8(b.as_ptr().add(i));
 
-            let a_nib = hex_parse_neon(a16, v_ascii_0, v_ascii_9, case_mask, v_ascii_a, v_ascii_f, offset_letter);
-            let b_nib = hex_parse_neon(b16, v_ascii_0, v_ascii_9, case_mask, v_ascii_a, v_ascii_f, offset_letter);
+            let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
+            let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
 
             let a_bad = vcgtq_u8(a_nib, fifteen_u);
             let b_bad = vcgtq_u8(b_nib, fifteen_u);
@@ -796,35 +795,30 @@ mod neon_simd {
     }
 
     /// Branchless vectorized hex ASCII → nibble (0-15) conversion.
-    /// Invalid chars produce values > 15 (for easy detection).
+    /// Invalid chars produce values > 15 (for easy detection by caller).
     ///
-    /// Logic per lane:
-    ///   if '0' <= c <= '9':  c - '0'
-    ///   elif 'A' <= (c & 0xDF) <= 'F':  (c & 0xDF) - 'A' + 10
-    ///   else: 0xFF
+    /// Strategy (7 NEON instructions):
+    ///   1. digit_val = c - '0': digits become 0-9
+    ///   2. letter_val = (c & 0xDF) - '0' - 7: letters become 10-15
+    ///   3. Select letter path where digit_val > 9
+    ///   4. Force invalid where letter result < 10 (catches '@', '`')
     #[inline(always)]
     unsafe fn hex_parse_neon(
         chars: uint8x16_t,
-        v_ascii_0: uint8x16_t,
-        v_ascii_9: uint8x16_t,
         case_mask: uint8x16_t,
-        v_ascii_a: uint8x16_t,
-        v_ascii_f: uint8x16_t,
-        offset_letter: uint8x16_t,
+        ascii_0: uint8x16_t,
+        seven: uint8x16_t,
+        nine: uint8x16_t,
+        ten: uint8x16_t,
     ) -> uint8x16_t {
-        // Digit path: result = c - '0'
-        let digit_val = vsubq_u8(chars, v_ascii_0);
-        let is_digit = vandq_u8(vcgeq_u8(chars, v_ascii_0), vcleq_u8(chars, v_ascii_9));
-
-        // Letter path: fold case, then result = (c & 0xDF) - 55
-        let upper = vandq_u8(chars, case_mask);
-        let letter_val = vsubq_u8(upper, offset_letter);
-        let is_letter = vandq_u8(vcgeq_u8(upper, v_ascii_a), vcleq_u8(upper, v_ascii_f));
-
-        // Merge: pick digit_val where is_digit, letter_val where is_letter, 0xFF otherwise
-        let invalid = vdupq_n_u8(0xFF);
-        let result = vbslq_u8(is_digit, digit_val, vbslq_u8(is_letter, letter_val, invalid));
-        result
+        let digit_val = vsubq_u8(chars, ascii_0);
+        let letter_val = vsubq_u8(vandq_u8(chars, case_mask), ascii_0);
+        let is_letter = vcgtq_u8(digit_val, nine);
+        let adjusted = vsubq_u8(letter_val, seven);
+        let result = vbslq_u8(is_letter, adjusted, digit_val);
+        // Force lanes invalid where letter path produced < 10 (e.g. '@' → 9)
+        let bad_letter = vandq_u8(is_letter, vcltq_u8(adjusted, ten));
+        vorrq_u8(result, bad_letter)
     }
 }
 
