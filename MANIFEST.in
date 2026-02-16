@@ -1,6 +1,11 @@
 include README.rst
-include requirements-dev.txt
-include pytest.ini
+include LICENSE
+include pyproject.toml
 
 graft test
-graft hexhamming
+graft src
+
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.so
+global-exclude __pycache__
