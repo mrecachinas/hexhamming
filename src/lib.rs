@@ -1842,6 +1842,81 @@ pub fn hex_hamming_distance_pack(a: &str, b: &str) -> Result<u64, &'static str> 
     unsafe { neon_simd::hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()) }
 }
 
+/// Set the SIMD algorithm used for hamming distance calculations.
+///
+/// Valid algorithm names:
+/// - `"avx512"` / `"avx-512"` — AVX-512 BITALG (requires avx512bw + avx512bitalg)
+/// - `"avx2"` / `"avx"` / `"extra"` — AVX2
+/// - `"sse41"` / `"sse"` — SSE4.1
+/// - `"neon"` — ARM NEON (aarch64 only)
+/// - `"native"` / `"popcount"` — platform native
+/// - `"classic"` — scalar fallback
+///
+/// Returns `Ok(())` on success, `Err` if the CPU doesn't support the requested algorithm.
+pub fn set_algorithm(algo_name: &str) -> Result<(), &'static str> {
+    match algo_name.to_lowercase().as_str() {
+        "avx512" | "avx-512" => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+                    CURRENT_ALGO.store(ALGO_AVX512, Ordering::Relaxed);
+                    return Ok(());
+                }
+                return Err("CPU doesn't support AVX-512 BITALG");
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            Err("AVX-512 not available on this architecture")
+        }
+        "extra" | "avx" | "avx2" => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    CURRENT_ALGO.store(ALGO_AVX2, Ordering::Relaxed);
+                    return Ok(());
+                }
+                return Err("CPU doesn't support AVX2");
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                CURRENT_ALGO.store(ALGO_NEON, Ordering::Relaxed);
+                Ok(())
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            Err("not available on this architecture")
+        }
+        "sse41" | "sse" => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("sse4.1") {
+                    CURRENT_ALGO.store(ALGO_SSE41, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err("CPU doesn't support SSE4.1")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            Err("SSE not available on this architecture")
+        }
+        "neon" => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                CURRENT_ALGO.store(ALGO_NEON, Ordering::Relaxed);
+                Ok(())
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            Err("NEON not available on this architecture")
+        }
+        "native" | "popcount" => {
+            CURRENT_ALGO.store(ALGO_NATIVE, Ordering::Relaxed);
+            Ok(())
+        }
+        "classic" => {
+            CURRENT_ALGO.store(ALGO_CLASSIC, Ordering::Relaxed);
+            Ok(())
+        }
+        _ => Err("unknown algorithm"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
