@@ -1,8 +1,14 @@
 include README.rst
+include LICENSE
+include Cargo.toml
+include pyproject.toml
 include requirements-dev.txt
 include pytest.ini
-include Cargo.toml
 
-graft test
-graft hexhamming
 graft src
+graft test
+
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.so
+global-exclude __pycache__

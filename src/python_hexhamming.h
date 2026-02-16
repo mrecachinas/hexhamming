@@ -555,7 +555,7 @@ inline uint64_t hamming_distance_loop_string(const char* a, const char* b, const
     }
     static uint64_t hamming_distance_bytes__extra(const uint8_t* a, const uint8_t* b,
                                                   const uint64_t length, const int64_t max_dist) {
-        if (max_dist > 0)
+        if (max_dist >= 0)
             return hamming_distance_bytes__native(a, b, length, max_dist);   //This is faster on ARMs.
         uint64_t difference = 0;
         uint64_t i = 0;

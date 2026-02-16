@@ -1,8 +1,16 @@
 #!/usr/bin/env python
 from platform import machine
 import pytest
-from hexhamming import check_hexstrings_within_dist, hamming_distance_string, \
-                        hamming_distance_bytes, check_bytes_arrays_within_dist, set_algo
+from hexhamming import (
+    check_hexstrings_within_dist,
+    check_bytes_within_dist,
+    hamming_distance_string,
+    hamming_distance_bytes,
+    check_bytes_arrays_first_within_dist,
+    check_bytes_arrays_best_within_dist,
+    check_bytes_arrays_all_within_dist,
+    set_algo,
+)
 
 ############################
 # hamming_distance tests
@@ -36,7 +44,9 @@ from hexhamming import check_hexstrings_within_dist, hamming_distance_string, \
 )
 def test_hamming_distance_string(hex1, hex2, expected):
     assert expected == hamming_distance_string(hex1, hex2)
-    assert len(set_algo('classic')) == 0        # we have only 2 algorithms for strings currently.
+    assert (
+        len(set_algo("classic")) == 0
+    )  # we have only 2 algorithms for strings currently.
     assert expected == hamming_distance_string(hex1, hex2)
 
 
@@ -45,7 +55,7 @@ def test_hamming_distance_string(hex1, hex2, expected):
     (
         (b"\xab\x0c", b"\xab\x0c", 0),
         (b"\x00", b"\x01", 1),
-        (b"\xAB\xCD\xEF", b"\x00\x00\x01", 16),
+        (b"\xab\xcd\xef", b"\x00\x00\x01", 16),
         (b"", b"", 0),
         (b"\xff" * 32, b"\x00" * 32, 256),
         (b"\xff" * 32, b"\xff" * 32, 0),
@@ -66,13 +76,13 @@ def test_hamming_distance_string(hex1, hex2, expected):
     ),
 )
 def test_hamming_distance_byte(hex1, hex2, expected):
-    algorithm_list = ['extra', 'native', 'classic']
-    if machine().lower().startswith('x86'):
-        algorithm_list.append('sse41')
+    algorithm_list = ["extra", "native", "classic"]
+    if machine().lower().startswith("x86"):
+        algorithm_list.append("sse41")
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
-            print(f'Warning: Skipping {algorithm}, reason: {result}')
+            print(f"Warning: Skipping {algorithm}, reason: {result}")
             continue
         assert expected == hamming_distance_bytes(hex1, hex2)
 
@@ -110,15 +120,35 @@ def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     ),
 )
 def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
-    algorithm_list = ['extra', 'native', 'classic']
-    if machine().lower().startswith('x86'):
-        algorithm_list.append('sse41')
+    algorithm_list = ["extra", "native", "classic"]
+    if machine().lower().startswith("x86"):
+        algorithm_list.append("sse41")
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
-            print(f'Warning: Skipping {algorithm}, reason: {result}')
+            print(f"Warning: Skipping {algorithm}, reason: {result}")
             continue
         assert expected == check_hexstrings_within_dist(hex1, hex2, max_dist)
+
+
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,expected",
+    (
+        (b"\x00\x0a\xbc\xde\xf0", b"\x01\x1a\xbc\xde\xf0", 3, True),
+        (b"\x1f\x0a\xbc\xde\xf0", b"\x01\x1a\xbc\xde\xf0", 3, False),
+        (b"\x01\x1a\xbc\xde\xf0", b"\x01\x1a\xbc\xde\xf0", 1000, True),
+    ),
+)
+def test_check_bytes_within_dist(bytes1, bytes2, max_dist, expected):
+    algorithm_list = ["extra", "native", "classic"]
+    if machine().lower().startswith("x86"):
+        algorithm_list.append("sse41")
+    for algorithm in algorithm_list:
+        result = set_algo(algorithm)
+        if len(result) > 0:
+            print(f"Warning: Skipping {algorithm}, reason: {result}")
+            continue
+        assert expected == check_bytes_within_dist(bytes1, bytes2, max_dist)
 
 
 @pytest.mark.parametrize(
@@ -145,7 +175,7 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
         ("011abcdef", "00", 3, ValueError, "strings are NOT the same length"),
     ),
 )
-def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
+def test_check_hexstrings_within_dist_errors(hex1, hex2, max_dist, exception, msg):
     with pytest.raises(exception) as excinfo:
         _ = check_hexstrings_within_dist(hex1, hex2, max_dist)
     assert msg in str(excinfo.value)
@@ -169,13 +199,78 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, exception, msg):
             "error occurred while parsing arguments",
         ),
         (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
-        (b"\x00" * 31, b"\x00" * 16, 3, ValueError, "`array_of_elems` size must be multiplier of `elem_to_compare`"),
+        (
+            b"\x00" * 31,
+            b"\x00" * 16,
+            3,
+            ValueError,
+            "`array_of_elems` size must be multiplier of `elem_to_compare`",
+        ),
         (b"\x00" * 32, b"", 3, ValueError, "`elem_to_compare` size must be >0"),
     ),
 )
-def test_check_bytes_arrays_within_dist_invalid_values(bytes1, bytes2, max_dist, exception, msg):
+def test_check_bytes_arrays_first_within_dist_invalid_values(
+    bytes1, bytes2, max_dist, exception, msg
+):
     with pytest.raises(exception) as excinfo:
-        _ = check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
+        _ = check_bytes_arrays_first_within_dist(bytes1, bytes2, max_dist)
+    assert msg in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,exception,msg",
+    (
+        (
+            b"\x00" * 31,
+            b"\x00" * 16,
+            100,
+            ValueError,
+            "`array_of_elems` size must be multiplier of `elem_to_compare`",
+        ),
+        (b"\x00" * 32, b"", 100, ValueError, "`elem_to_compare` size must be >0"),
+    ),
+)
+def test_check_bytes_arrays_all_within_dist_invalid_values(
+    bytes1, bytes2, max_dist, exception, msg
+):
+    with pytest.raises(exception) as excinfo:
+        _ = check_bytes_arrays_all_within_dist(bytes1, bytes2, max_dist)
+    assert msg in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,exception,msg",
+    (
+        (
+            b"\x00" * 16,
+            b"\x00" * 16,
+            None,
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
+        (
+            b"\x00" * 16,
+            b"\x00" * 16,
+            "HELLO",
+            ValueError,
+            "error occurred while parsing arguments",
+        ),
+        (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
+        (
+            b"\x00" * 31,
+            b"\x00" * 16,
+            3,
+            ValueError,
+            "`array_of_elems` size must be multiplier of `elem_to_compare`",
+        ),
+        (b"\x00" * 32, b"", 3, ValueError, "`elem_to_compare` size must be >0"),
+    ),
+)
+def test_check_bytes_arrays_best_within_dist_invalid_values(
+    bytes1, bytes2, max_dist, exception, msg
+):
+    with pytest.raises(exception) as excinfo:
+        _ = check_bytes_arrays_best_within_dist(bytes1, bytes2, max_dist)
     assert msg in str(excinfo.value)
 
 
@@ -184,36 +279,93 @@ def test_check_bytes_arrays_within_dist_invalid_values(bytes1, bytes2, max_dist,
     (
         (
             b"\x00" * 16,
-            b"\xFF" * 16,
-            50, -1,
+            b"\xff" * 16,
+            50,
+            -1,
         ),
         (
             b"\x00" * 16,
-            b"\x00" * 15 + b"\x0F" * 1,
-            4, 0,
+            b"\x00" * 15 + b"\x0f" * 1,
+            4,
+            0,
         ),
         (
-            b"\xFF" * 16 * 8 + b"\x0F" * 16,
-            b"\x00" * 2 + b"\x0F" * 14,
-            8, 8,
+            b"\xff" * 16 * 8 + b"\x0f" * 16,
+            b"\x00" * 2 + b"\x0f" * 14,
+            8,
+            8,
         ),
         (
-            b"\xF0" * 64 + b"\x0A" * 64,
-            b"\x0F" * 64,
-            3 * 64, 1,
-        )
+            b"\xf0" * 64 + b"\x0a" * 64,
+            b"\x0f" * 64,
+            3 * 64,
+            1,
+        ),
     ),
 )
-def test_check_bytes_arrays_within_dist_calculation(bytes1, bytes2, max_dist, expected):
-    algorithm_list = ['extra', 'native', 'classic']
-    if machine().lower().startswith('x86'):
-        algorithm_list.append('sse41')
+def test_check_bytes_arrays_first_within_dist_calculation(
+    bytes1, bytes2, max_dist, expected
+):
+    algorithm_list = ["extra", "native", "classic"]
+    if machine().lower().startswith("x86"):
+        algorithm_list.append("sse41")
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
-            print(f'Warning: Skipping {algorithm}, reason: {result}')
+            print(f"Warning: Skipping {algorithm}, reason: {result}")
             continue
-        assert expected == check_bytes_arrays_within_dist(bytes1, bytes2, max_dist)
+        assert expected == check_bytes_arrays_first_within_dist(
+            bytes1, bytes2, max_dist
+        )
+
+
+@pytest.mark.parametrize(
+    "bytes1,bytes2,max_dist,expected",
+    (
+        (
+            b"\x00" * 16 * 4,
+            b"\xff" * 16,
+            50,
+            [],
+        ),
+        (
+            b"\x00" * 16,
+            b"\x00" * 15 + b"\x0f" * 1,
+            4,
+            [(4, 0)],
+        ),
+        (
+            b"\xff" * 16 * 8 + b"\x0f" * 16,
+            b"\x00" * 2 + b"\x0f" * 14,
+            8,
+            [(8, 8)],
+        ),
+        (
+            b"\xf0" * 64 + b"\x0a" * 64,
+            b"\x0f" * 64,
+            3 * 64,
+            [(128, 1)],
+        ),
+        (
+            b"\xff" * 16 * 4 + b"\x0f" * 16 + b"\xff" * 16 * 4 + b"\x0e" * 16,
+            b"\x00" * 2 + b"\x0f" * 14,
+            32,
+            [(8, 4), (20, 9)],
+        ),
+    ),
+)
+def test_check_bytes_arrays_all_within_dist_calculation(
+    bytes1, bytes2, max_dist, expected
+):
+    algorithm_list = ["extra", "native", "classic"]
+    if machine().lower().startswith("x86"):
+        algorithm_list.append("sse41")
+    for algorithm in algorithm_list:
+        result = set_algo(algorithm)
+        if len(result) > 0:
+            print(f"Warning: Skipping {algorithm}, reason: {result}")
+            continue
+        assert expected == check_bytes_arrays_all_within_dist(bytes1, bytes2, max_dist)
 
 
 @pytest.mark.benchmark(group="hamming_distance_string")
@@ -246,13 +398,13 @@ def test_hamming_distance_string_bench(benchmark, hex1, hex2):
 @pytest.mark.parametrize(
     ("hex1", "hex2"),
     (
-        (b"\xAB\x0C", b"\xDE\x0F"),
-        (b"\xBB\x0B", b"\xBB\x0B"),
-        (b"\xBB" * 500, b"\xBB" * 500),
-        (b"\xFF" * 500, b"\x00" * 500),
-        (b"\xBB" * 512, b"\xBB" * 512),
-        (b"\xFF" * 512, b"\x00" * 512),
-        (b"\xFF" * 32, b"\x00" * 32),
+        (b"\xab\x0c", b"\xde\x0f"),
+        (b"\xbb\x0b", b"\xbb\x0b"),
+        (b"\xbb" * 500, b"\xbb" * 500),
+        (b"\xff" * 500, b"\x00" * 500),
+        (b"\xbb" * 512, b"\xbb" * 512),
+        (b"\xff" * 512, b"\x00" * 512),
+        (b"\xff" * 32, b"\x00" * 32),
     ),
     ids=(
         "3-diff",
@@ -272,28 +424,25 @@ def test_check_hexstrings_within_dist_bench(benchmark):
     benchmark(check_hexstrings_within_dist, "F" * 1000, "0" * 1000, 20)
 
 
-@pytest.mark.benchmark(group="hamming_distance_bytes_arrays_within_dist")
+@pytest.mark.benchmark(
+    group="hamming_distance_check_bytes_arrays_first_within_dist_bench"
+)
 @pytest.mark.parametrize(
     ("bytes1", "bytes2", "max_dist"),
     (
-        (b"\x00" * 16 + b"\x00\x03" * 8 * 511,
-         b"\x00" * 16, 1),
-        (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255,
-         b"\x00" * 16, 1),
-        (b"\x00\x03" * 8 * 511 + b"\x00" * 16,
-         b"\x00" * 16, 1),
-        (b"\xFF" * 32 + b"\x11" * 32 * 1023,
-         b"\xFB" * 32, 4*32),
-        (b"\x11" * 32 * 511 + b"\xFF" * 32 + b"\x11" * 32 * 512,
-         b"\xFB" * 32, 4*32),
-        (b"\x11" * 32 * 1023 + b"\xFF" * 32,
-         b"\xFB" * 32, 4*32),
-        (b"\xCC" * 64 + b"\x01" * 64 * 16383,
-         b"\xFB" * 64, 5*64),
-        (b"\x01" * 64 * 8191 + b"\xCC" * 64 + b"\x01" * 64 * 8192,
-         b"\xFB" * 64, 5*64),
-        (b"\x01" * 64 * 16383 + b"\xCC" * 64,
-         b"\xFB" * 64, 5*64),
+        (b"\x00" * 16 + b"\x00\x03" * 8 * 511, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 511 + b"\x00" * 16, b"\x00" * 16, 1),
+        (b"\xff" * 32 + b"\x11" * 32 * 1023, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 511 + b"\xff" * 32 + b"\x11" * 32 * 512, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 1023 + b"\xff" * 32, b"\xfb" * 32, 4 * 32),
+        (b"\xcc" * 64 + b"\x01" * 64 * 16383, b"\xfb" * 64, 5 * 64),
+        (
+            b"\x01" * 64 * 8191 + b"\xcc" * 64 + b"\x01" * 64 * 8192,
+            b"\xfb" * 64,
+            5 * 64,
+        ),
+        (b"\x01" * 64 * 16383 + b"\xcc" * 64, b"\xfb" * 64, 5 * 64),
     ),
     ids=(
         "  512 elems,s=16,at 0",
@@ -307,5 +456,79 @@ def test_check_hexstrings_within_dist_bench(benchmark):
         "16384 elems,s=64,end",
     ),
 )
-def test_check_bytes_arrays_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
-    benchmark(check_bytes_arrays_within_dist, bytes1, bytes2, max_dist)
+def test_check_bytes_arrays_first_within_dist_bench(
+    benchmark, bytes1, bytes2, max_dist
+):
+    benchmark(check_bytes_arrays_first_within_dist, bytes1, bytes2, max_dist)
+
+
+@pytest.mark.benchmark(
+    group="hamming_distance_check_bytes_arrays_best_within_dist_bench"
+)
+@pytest.mark.parametrize(
+    ("bytes1", "bytes2", "max_dist"),
+    (
+        (b"\x00" * 16 + b"\x00\x03" * 8 * 511, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 511 + b"\x00" * 16, b"\x00" * 16, 1),
+        (b"\xff" * 32 + b"\x11" * 32 * 1023, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 511 + b"\xff" * 32 + b"\x11" * 32 * 512, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 1023 + b"\xff" * 32, b"\xfb" * 32, 4 * 32),
+        (b"\xcc" * 64 + b"\x01" * 64 * 16383, b"\xfb" * 64, 5 * 64),
+        (
+            b"\x01" * 64 * 8191 + b"\xcc" * 64 + b"\x01" * 64 * 8192,
+            b"\xfb" * 64,
+            5 * 64,
+        ),
+        (b"\x01" * 64 * 16383 + b"\xcc" * 64, b"\xfb" * 64, 5 * 64),
+    ),
+    ids=(
+        "  512 elems,s=16,at 0",
+        "  512 elems,s=16,mid",
+        "  512 elems,s=16,end",
+        " 1024 elems,s=32,at 0",
+        " 1024 elems,s=32,mid",
+        " 1024 elems,s=32,end",
+        "16384 elems,s=64,at 0",
+        "16384 elems,s=64,mid",
+        "16384 elems,s=64,end",
+    ),
+)
+def test_check_bytes_arrays_best_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
+    benchmark(check_bytes_arrays_best_within_dist, bytes1, bytes2, max_dist)
+
+
+@pytest.mark.benchmark(
+    group="hamming_distance_check_bytes_arrays_all_within_dist_bench"
+)
+@pytest.mark.parametrize(
+    ("bytes1", "bytes2", "max_dist"),
+    (
+        (b"\x00" * 16 + b"\x00\x03" * 8 * 511, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 256 + b"\x00" * 16 + b"\x00\x03" * 8 * 255, b"\x00" * 16, 1),
+        (b"\x00\x03" * 8 * 511 + b"\x00" * 16, b"\x00" * 16, 1),
+        (b"\xff" * 32 + b"\x11" * 32 * 1023, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 511 + b"\xff" * 32 + b"\x11" * 32 * 512, b"\xfb" * 32, 4 * 32),
+        (b"\x11" * 32 * 1023 + b"\xff" * 32, b"\xfb" * 32, 4 * 32),
+        (b"\xcc" * 64 + b"\x01" * 64 * 16383, b"\xfb" * 64, 5 * 64),
+        (
+            b"\x01" * 64 * 8191 + b"\xcc" * 64 + b"\x01" * 64 * 8192,
+            b"\xfb" * 64,
+            5 * 64,
+        ),
+        (b"\x01" * 64 * 16383 + b"\xcc" * 64, b"\xfb" * 64, 5 * 64),
+    ),
+    ids=(
+        "  512 elems,s=16,at 0",
+        "  512 elems,s=16,mid",
+        "  512 elems,s=16,end",
+        " 1024 elems,s=32,at 0",
+        " 1024 elems,s=32,mid",
+        " 1024 elems,s=32,end",
+        "16384 elems,s=64,at 0",
+        "16384 elems,s=64,mid",
+        "16384 elems,s=64,end",
+    ),
+)
+def test_check_bytes_arrays_all_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
+    benchmark(check_bytes_arrays_all_within_dist, bytes1, bytes2, max_dist)
