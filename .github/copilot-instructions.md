@@ -1,6 +1,6 @@
 # hexhamming - Fast Hamming Distance Calculation
 
-hexhamming is a Python C extension module that provides blazingly fast bitwise Hamming distance calculation for hexadecimal strings and byte arrays. It uses vectorized algorithms (SSE4.1, AVX2, ARM NEON) for optimal performance.
+hexhamming is a Python extension module written in Rust (via PyO3/maturin) that provides blazingly fast bitwise Hamming distance calculation for hexadecimal strings and byte arrays. It uses vectorized algorithms (SSE4.1, AVX2, AVX-512, ARM NEON) for optimal performance.
 
 Always reference these instructions first and fallback to search or bash commands only when you encounter unexpected information that does not match the info here.
 
@@ -10,23 +10,17 @@ Always reference these instructions first and fallback to search or bash command
 Run these commands in sequence to set up the development environment:
 
 ```bash
-# Install development dependencies
-pip3 install -r requirements-dev.txt
-# Takes ~30 seconds - includes pytest, black, pytest-benchmark
+# Install Rust toolchain (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Build and install the package (RECOMMENDED METHOD)
 pip3 install .
-# Takes 2-3 minutes. NEVER CANCEL - C++ compilation requires time.
+# Takes 1-2 minutes. NEVER CANCEL - Rust compilation requires time.
 # Set timeout to 5+ minutes for build commands.
-```
 
-### Alternative Build Methods
-If the recommended method fails due to network issues:
-
-```bash
-# Legacy build method (always works offline)
-python3 setup.py install --user
-# Takes 2-3 minutes. NEVER CANCEL. Shows deprecation warnings but works reliably.
+# Or use maturin directly for development
+pip install maturin
+maturin develop --release
 ```
 
 ### Running Tests
@@ -39,22 +33,23 @@ python3 -m pytest -vls .
 # Quick test run (no benchmarks)
 python3 -m pytest test/ -k "not bench"
 # Takes ~5 seconds for functional tests only.
+
+# Run Rust unit tests
+cargo test
 ```
 
 ### Code Quality and CI Requirements
 ```bash
 # CRITICAL: Check code formatting before committing
-black --check .
-# Returns exit code 1 if formatting needed
+ruff check .
+ruff format --check .
 
 # Fix code formatting (if needed)
-black .
-# Reformats Python files to match project standards
+ruff format .
 
-# Validate package manifest
-python3 -m pip install check-manifest
-python3 -m check_manifest
-# Verifies all files are properly included in package
+# Rust formatting
+cargo fmt --check
+cargo fmt  # to fix
 ```
 
 ## Validation Scenarios
@@ -104,9 +99,9 @@ Test that your changes don't break the build:
 
 ```bash
 # Clean build test (removes any cached artifacts)
-rm -rf build/ dist/ *.egg-info/ test/__pycache__/ .pytest_cache/
+rm -rf target/wheels/ test/__pycache__/ .pytest_cache/
 pip3 install .
-# Takes 2-3 minutes. NEVER CANCEL.
+# Takes 1-2 minutes. NEVER CANCEL.
 
 # Verify installation worked
 python3 -c "import hexhamming; print('✓ Import successful')"
@@ -114,18 +109,11 @@ python3 -c "import hexhamming; print('✓ Import successful')"
 
 ## Common Build Issues and Solutions
 
-### Network Connectivity Problems
-If `pip install` or `python -m build` fail with network errors:
-- Use the legacy method: `python3 setup.py install --user`
-- This method works completely offline after initial dependency installation
-
-### Build Dependencies Missing
-If you get compiler errors:
+### Rust Toolchain Missing
+If you get errors about `cargo` or `rustc` not found:
 ```bash
-# Install build essentials (Ubuntu/Debian)
-sudo apt-get update && sudo apt-get install build-essential python3-dev
-
-# On other systems, ensure you have a C++ compiler and Python headers
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
 ```
 
 ### Test Failures
@@ -137,13 +125,11 @@ If tests fail after your changes:
 ## Performance Expectations
 
 ### CRITICAL Timing Information - NEVER CANCEL
-- **Development setup**: 30 seconds to 2 minutes
-- **Package build**: 2-3 minutes (C++ compilation takes time)
+- **Package build**: 1-2 minutes (Rust compilation takes time)
 - **Full test suite**: ~27 seconds (includes performance benchmarks)
 - **Code formatting**: 1-2 seconds
-- **Manifest check**: 5-10 seconds
 
-**NEVER CANCEL builds or long-running commands.** C++ compilation and performance benchmarks require time to complete. Always set timeouts of 5+ minutes for builds and 2+ minutes for tests.
+**NEVER CANCEL builds or long-running commands.** Rust compilation and performance benchmarks require time to complete. Always set timeouts of 5+ minutes for builds and 2+ minutes for tests.
 
 ## Repository Structure
 
@@ -151,24 +137,23 @@ If tests fail after your changes:
 ```
 hexhamming/
 ├── README.rst              # Main documentation and usage examples
-├── setup.py                # Build configuration with C++ extension
-├── requirements-dev.txt    # Development dependencies (pytest, black, etc.)
-├── hexhamming/            # C++ source code directory
-│   ├── python_hexhamming.cc    # Main C++ implementation
-│   ├── python_hexhamming.h     # Header with vectorized algorithms
-│   └── _version.h              # Version information
+├── Cargo.toml              # Rust package manifest and dependencies
+├── pyproject.toml           # Python package metadata (maturin build backend)
+├── src/
+│   └── lib.rs              # Rust implementation (PyO3 bindings + SIMD algorithms)
+├── benches/
+│   └── bench.rs            # Criterion benchmarks for Rust API
 ├── test/
-│   └── test_hexhamming.py      # Comprehensive test suite with benchmarks
-├── .github/workflows/
-│   └── pythonpackage.yml      # CI/CD pipeline using cibuildwheel
-└── MANIFEST.in             # Package file inclusion rules
+│   └── test_hexhamming.py  # Comprehensive Python test suite with benchmarks
+└── .github/workflows/
+    └── pythonpackage.yml   # CI/CD pipeline (maturin + PyPI publish)
 ```
 
 ### Important Code Locations
-- **Algorithm implementations**: `hexhamming/python_hexhamming.h` (lines 150-630)
-- **Python bindings**: `hexhamming/python_hexhamming.cc`
+- **Algorithm implementations**: `src/lib.rs` (SIMD dispatch, SSE/AVX2/AVX-512/NEON)
+- **Python bindings**: `src/lib.rs` (PyO3 `#[pyfunction]` exports)
 - **Performance tests**: `test/test_hexhamming.py` (lines 100+)
-- **Build configuration**: `setup.py` (platform-specific optimizations)
+- **Build configuration**: `Cargo.toml` + `pyproject.toml`
 
 ## Development Workflow
 
@@ -176,29 +161,27 @@ hexhamming/
 1. **ALWAYS** run the setup commands first
 2. Make your code changes
 3. **IMMEDIATELY** test with validation scenarios
-4. Run `black --check .` and fix formatting if needed
+4. Run `ruff format --check .` and fix formatting if needed
 5. Run full test suite: `python3 -m pytest -vls .`
-6. Run `check-manifest` to verify package integrity
 
 ### Before Committing
 ```bash
 # Required checks that CI will run
-black --check .           # Code formatting
-python3 -m check_manifest # Package manifest
+ruff check .              # Linting
+ruff format --check .     # Code formatting
+cargo fmt --check         # Rust formatting
 python3 -m pytest -vls .  # Full test suite
 ```
 
 ### CI/CD Information
-The project uses GitHub Actions with cibuildwheel for cross-platform wheel building:
-- Builds wheels for Linux (manylinux, musllinux), macOS, Windows
-- Tests on Python 3.6-3.10
+The project uses GitHub Actions with maturin for cross-platform wheel building:
+- Builds wheels for Linux (manylinux), macOS, Windows
+- Tests on Python 3.10-3.14
 - **Build time in CI**: 15-45 minutes depending on platform
-- **Network dependencies**: Requires PyPI access for dependencies
 
 If CI fails on build steps, it's often due to:
-1. Code formatting issues (run `black .`)
-2. Package manifest issues (run `check-manifest`)
-3. Test failures (run validation scenarios locally)
+1. Code formatting issues (run `ruff format .`)
+2. Test failures (run validation scenarios locally)
 
 ## Troubleshooting
 
@@ -206,13 +189,7 @@ If CI fails on build steps, it's often due to:
 Ensure you've installed the package: `pip3 install .`
 
 ### Compilation errors
-Check that you have build tools: `sudo apt-get install build-essential python3-dev`
+Ensure Rust is installed: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
 ### Test failures
 Run validation scenarios individually to isolate issues.
-
-### Network timeouts
-Use legacy build method: `python3 setup.py install --user`
-
-### Formatting issues
-Run `black .` to fix all formatting issues automatically.
