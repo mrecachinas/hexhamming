@@ -40,6 +40,8 @@ const ALGO_NATIVE: u8 = 1;
 const ALGO_SSE41: u8 = 2;
 #[cfg(target_arch = "x86_64")]
 const ALGO_AVX2: u8 = 3;
+#[cfg(target_arch = "x86_64")]
+const ALGO_AVX512: u8 = 5;
 #[cfg(target_arch = "aarch64")]
 const ALGO_NEON: u8 = 4;
 
@@ -707,6 +709,173 @@ mod x86_simd {
         Ok(difference)
     }
 
+    /// Branchless vectorized hex ASCII → nibble conversion for AVX-512BW.
+    /// 64 lanes, same subtract-and-correct strategy.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    unsafe fn hex_parse_avx512(
+        chars: __m512i,
+        case_mask: __m512i,
+        ascii_0: __m512i,
+        seven: __m512i,
+        nine: __m512i,
+        ten: __m512i,
+    ) -> __m512i {
+        let digit_val = _mm512_sub_epi8(chars, ascii_0);
+        let letter_val = _mm512_sub_epi8(_mm512_and_si512(chars, case_mask), ascii_0);
+        let is_letter = _mm512_cmpgt_epi8_mask(digit_val, nine);
+        let adjusted = _mm512_sub_epi8(letter_val, seven);
+        let result = _mm512_mask_blend_epi8(is_letter, digit_val, adjusted);
+        // Force lanes invalid where letter path produced < 10 (e.g. '@' → 9)
+        let bad_letter = is_letter & _mm512_cmpgt_epi8_mask(ten, adjusted);
+        let ones = _mm512_set1_epi8(-1);  // 0xFF
+        _mm512_mask_blend_epi8(bad_letter, result, ones)
+    }
+
+    /// AVX-512 BITALG implementation for hex strings.
+    /// Parses 64 hex chars per load, XORs nibbles directly, uses VPOPCNTB
+    /// for native per-byte popcount — no pack step needed.
+    #[target_feature(enable = "avx512bw", enable = "avx512bitalg", enable = "popcnt")]
+    pub unsafe fn hamming_distance_string_avx512(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+        let length = a.len();
+
+        if length < 64 {
+            return hamming_distance_string_avx2(a, b);
+        }
+
+        let fifteen = _mm512_set1_epi8(15);
+        let case_mask = _mm512_set1_epi8(!0x20i8);     // 0xDF
+        let ascii_0 = _mm512_set1_epi8(b'0' as i8);
+        let seven = _mm512_set1_epi8(7);
+        let nine = _mm512_set1_epi8(9);
+        let ten = _mm512_set1_epi8(10);
+        let zero = _mm512_setzero_si512();
+
+        let mut i = 0;
+        let mut total = _mm512_setzero_si512();
+
+        // Process 64 hex chars at a time
+        // Each nibble XOR produces at most 4 set bits, so per-byte popcount
+        // accumulator maxes at 4 per lane. Safe to accumulate 63 iterations
+        // (63 * 4 = 252 < 255) before horizontal sum. For <256 chars we
+        // never exceed 4 iterations, so no overflow concern.
+        while i + 64 <= length {
+            let a_nib = hex_parse_avx512(
+                _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_nib = hex_parse_avx512(
+                _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+
+            // Validate: any nibble > 15 or < 0 (signed) means invalid
+            let invalid = _mm512_cmpgt_epi8_mask(a_nib, fifteen)
+                | _mm512_cmpgt_epi8_mask(b_nib, fifteen)
+                | _mm512_cmpgt_epi8_mask(zero, a_nib)
+                | _mm512_cmpgt_epi8_mask(zero, b_nib);
+            if invalid != 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles and VPOPCNTB — counts set bits per byte
+            let xor = _mm512_xor_si512(a_nib, b_nib);
+            let cnt = _mm512_popcnt_epi8(xor);
+            total = _mm512_add_epi8(total, cnt);
+
+            i += 64;
+        }
+
+        // Horizontal sum via SAD against zero → u64 lanes
+        let sad = _mm512_sad_epu8(total, zero);
+        let mut difference = _mm512_reduce_add_epi64(sad) as u64;
+
+        // Fall through to AVX2/SSE for remaining < 64 chars
+        if i < length {
+            difference += hamming_distance_string_avx2(&a[i..], &b[i..])?;
+        }
+
+        Ok(difference)
+    }
+
+    /// AVX-512 BITALG implementation for byte arrays.
+    /// XOR + VPOPCNTB for native per-byte popcount.
+    #[target_feature(enable = "avx512bw", enable = "avx512bitalg", enable = "popcnt")]
+    pub unsafe fn hamming_distance_bytes_avx512(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+        let length = a.len();
+        let mut i = 0;
+
+        if length < 64 {
+            return hamming_distance_bytes_avx2(a, b, max_dist);
+        }
+
+        let zero = _mm512_setzero_si512();
+
+        if max_dist < 0 {
+            let mut total = _mm512_setzero_si512();
+
+            // Process 1024 bytes at a time (16 × 64) before horizontal sum
+            // Per-lane max: 16 × 8 = 128 < 255, safe for u8
+            while i + 1024 <= length {
+                let mut acc = _mm512_setzero_si512();
+                for _ in 0..16 {
+                    let a64 = _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i);
+                    let b64 = _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i);
+                    let xor = _mm512_xor_si512(a64, b64);
+                    acc = _mm512_add_epi8(acc, _mm512_popcnt_epi8(xor));
+                    i += 64;
+                }
+                total = _mm512_add_epi64(total, _mm512_sad_epu8(acc, zero));
+            }
+
+            // Process remaining 64-byte chunks
+            let mut acc = _mm512_setzero_si512();
+            while i + 64 <= length {
+                let a64 = _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i);
+                let b64 = _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i);
+                let xor = _mm512_xor_si512(a64, b64);
+                acc = _mm512_add_epi8(acc, _mm512_popcnt_epi8(xor));
+                i += 64;
+            }
+            total = _mm512_add_epi64(total, _mm512_sad_epu8(acc, zero));
+
+            let mut difference = _mm512_reduce_add_epi64(total) as u64;
+
+            // Scalar tail
+            while i < length {
+                difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+                i += 1;
+            }
+            difference
+        } else {
+            // Early termination path
+            let max_dist_u64 = max_dist as u64;
+            let mut difference: u64 = 0;
+
+            while i + 64 <= length {
+                let a64 = _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i);
+                let b64 = _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i);
+                let xor = _mm512_xor_si512(a64, b64);
+                let cnt = _mm512_popcnt_epi8(xor);
+                let sad = _mm512_sad_epu8(cnt, zero);
+                difference += _mm512_reduce_add_epi64(sad) as u64;
+                if difference > max_dist_u64 {
+                    return 0;
+                }
+                i += 64;
+            }
+
+            while i < length {
+                difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+                if difference > max_dist_u64 {
+                    return 0;
+                }
+                i += 1;
+            }
+            1
+        }
+    }
+
     /// Branchless vectorized hex ASCII → nibble conversion for SSE4.1.
     /// Same subtract-and-correct strategy as the NEON version:
     ///   1. digit_val = c - '0': digits → 0-9
@@ -1132,6 +1301,17 @@ fn hamming_distance_bytes_dispatch(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
         ALGO_CLASSIC => hamming_distance_bytes_classic(a, b, max_dist),
 
         #[cfg(target_arch = "x86_64")]
+        ALGO_AVX512 => {
+            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+                unsafe { x86_simd::hamming_distance_bytes_avx512(a, b, max_dist) }
+            } else if is_x86_feature_detected!("avx2") {
+                unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, max_dist) }
+            } else {
+                hamming_distance_bytes_native(a, b, max_dist)
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
         ALGO_AVX2 => {
             if is_x86_feature_detected!("avx2") {
                 unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, max_dist) }
@@ -1165,13 +1345,20 @@ fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64, &'static 
     #[cfg(target_arch = "x86_64")]
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
-        if (algo == ALGO_AVX2 || algo == ALGO_NATIVE)
+        if (algo == ALGO_AVX512 || algo == ALGO_NATIVE)
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return unsafe { x86_simd::hamming_distance_string_avx512(a, b) };
+        }
+        if (algo == ALGO_AVX512 || algo == ALGO_AVX2 || algo == ALGO_NATIVE)
             && is_x86_feature_detected!("avx2")
             && is_x86_feature_detected!("popcnt")
         {
             return unsafe { x86_simd::hamming_distance_string_avx2(a, b) };
         }
-        if (algo == ALGO_AVX2 || algo == ALGO_SSE41 || algo == ALGO_NATIVE)
+        if (algo == ALGO_AVX512 || algo == ALGO_AVX2 || algo == ALGO_SSE41 || algo == ALGO_NATIVE)
             && is_x86_feature_detected!("sse4.1")
             && is_x86_feature_detected!("popcnt")
         {
@@ -1421,6 +1608,12 @@ fn check_bytes_arrays_within_dist(
         }
 
         #[cfg(target_arch = "x86_64")]
+        ALGO_AVX512 if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") => {
+            array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
+                |a, b, m| unsafe { x86_simd::hamming_distance_bytes_avx512(a, b, m) })
+        }
+
+        #[cfg(target_arch = "x86_64")]
         ALGO_AVX2 if is_x86_feature_detected!("avx2") => {
             array_scan_loop!(big_array, elem_size, num_elements, small_array, max_dist_val,
                 |a, b, m| unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, m) })
@@ -1451,6 +1644,19 @@ fn check_bytes_arrays_within_dist(
 #[pyfunction]
 fn set_algo(algo_name: &str) -> PyResult<String> {
     match algo_name.to_lowercase().as_str() {
+        "avx512" | "avx-512" => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+                    CURRENT_ALGO.store(ALGO_AVX512, Ordering::Relaxed);
+                    return Ok(String::new());
+                }
+                return Ok("CPU doesn't support AVX-512 BITALG".to_string());
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            Ok("Library was built without this algorithm.".to_string())
+        }
+
         "extra" | "avx" | "avx2" => {
             #[cfg(target_arch = "x86_64")]
             {
@@ -1522,7 +1728,9 @@ fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Auto-detect best algorithm on module load
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+            CURRENT_ALGO.store(ALGO_AVX512, Ordering::Relaxed);
+        } else if is_x86_feature_detected!("avx2") {
             CURRENT_ALGO.store(ALGO_AVX2, Ordering::Relaxed);
         } else if is_x86_feature_detected!("sse4.1") {
             CURRENT_ALGO.store(ALGO_SSE41, Ordering::Relaxed);
