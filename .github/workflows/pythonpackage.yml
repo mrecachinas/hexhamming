@@ -90,7 +90,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --find-interpreter
           manylinux: auto
           before-script-linux: |
             # Install Rust in manylinux container
