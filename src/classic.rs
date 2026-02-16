@@ -146,3 +146,68 @@ pub(crate) fn hamming_distance_bytes_classic(a: &[u8], b: &[u8], max_dist: i64) 
         1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popcnt64_known_values() {
+        assert_eq!(popcnt64_classic(0), 0);
+        assert_eq!(popcnt64_classic(1), 1);
+        assert_eq!(popcnt64_classic(0xFF), 8);
+        assert_eq!(popcnt64_classic(0xFFFFFFFFFFFFFFFF), 64);
+        assert_eq!(popcnt64_classic(0xAAAAAAAAAAAAAAAA), 32);
+        assert_eq!(popcnt64_classic(0xDEADBEEF), 24);
+    }
+
+    #[test]
+    fn string_classic_basic() {
+        assert_eq!(hamming_distance_string_classic(b"ff", b"00").unwrap(), 8);
+        assert_eq!(hamming_distance_string_classic(b"deadbeef", b"00000000").unwrap(), 24);
+        assert_eq!(hamming_distance_string_classic(b"0000", b"0000").unwrap(), 0);
+    }
+
+    #[test]
+    fn string_classic_invalid() {
+        assert!(hamming_distance_string_classic(b"zz", b"00").is_err());
+        assert!(hamming_distance_string_classic(b"gg", b"00").is_err());
+    }
+
+    #[test]
+    fn string_classic_odd_length() {
+        assert_eq!(hamming_distance_string_classic(b"f", b"0").unwrap(), 4);
+        assert_eq!(hamming_distance_string_classic(b"fff", b"000").unwrap(), 12);
+        assert_eq!(hamming_distance_string_classic(b"fffff", b"00000").unwrap(), 20);
+    }
+
+    #[test]
+    fn bytes_classic_full_distance() {
+        assert_eq!(hamming_distance_bytes_classic(b"\xff", b"\x00", -1), 8);
+        assert_eq!(hamming_distance_bytes_classic(b"\x00\x00", b"\x00\x00", -1), 0);
+        // 64 bytes to exercise 32-byte unrolled loop
+        let a = vec![0xFFu8; 64];
+        let b = vec![0x00u8; 64];
+        assert_eq!(hamming_distance_bytes_classic(&a, &b, -1), 512);
+    }
+
+    #[test]
+    fn bytes_classic_with_max_dist() {
+        // Within threshold → returns 1
+        assert_eq!(hamming_distance_bytes_classic(b"\xff", b"\xfe", 2), 1);
+        // Exceeds threshold → returns 0
+        assert_eq!(hamming_distance_bytes_classic(b"\xff", b"\x00", 2), 0);
+    }
+
+    #[test]
+    fn bytes_classic_tail_bytes() {
+        // 9 bytes: exercises 8-byte chunk + 1 tail byte
+        let a = vec![0xFF; 9];
+        let b = vec![0x00; 9];
+        assert_eq!(hamming_distance_bytes_classic(&a, &b, -1), 72);
+        // 7 bytes: no 8-byte chunks, all tail
+        let a = vec![0xFF; 7];
+        let b = vec![0x00; 7];
+        assert_eq!(hamming_distance_bytes_classic(&a, &b, -1), 56);
+    }
+}

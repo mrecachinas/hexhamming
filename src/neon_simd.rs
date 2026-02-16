@@ -237,3 +237,81 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
 
     Ok(difference)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neon_string_basic() {
+        unsafe {
+            assert_eq!(hamming_distance_string_neon(b"deadbeef", b"00000000").unwrap(), 24);
+            assert_eq!(hamming_distance_string_neon(b"ffff", b"0000").unwrap(), 16);
+            assert_eq!(hamming_distance_string_neon(b"0000", b"0000").unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn neon_string_16_chars() {
+        // Exactly 16 chars — one NEON iteration, no tail
+        unsafe {
+            let a = "f".repeat(16);
+            let b = "0".repeat(16);
+            assert_eq!(hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(), 64);
+        }
+    }
+
+    #[test]
+    fn neon_string_64_chars() {
+        // 64 chars — exercises the batched 4×16 loop
+        unsafe {
+            let a = "f".repeat(64);
+            let b = "0".repeat(64);
+            assert_eq!(hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(), 256);
+        }
+    }
+
+    #[test]
+    fn neon_string_invalid() {
+        unsafe {
+            assert!(hamming_distance_string_neon(b"zzzzzzzzzzzzzzzz", b"0000000000000000").is_err());
+            assert!(hamming_distance_string_neon(b"@@@@@@@@@@@@@@@@", b"0000000000000000").is_err());
+        }
+    }
+
+    #[test]
+    fn neon_pack_basic() {
+        unsafe {
+            let a = "f".repeat(32);
+            let b = "0".repeat(32);
+            assert_eq!(hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(), 128);
+        }
+    }
+
+    #[test]
+    fn neon_pack_with_tail() {
+        // 48 chars: 32-char pack loop + 16-char NEON tail
+        unsafe {
+            let a = "f".repeat(48);
+            let b = "0".repeat(48);
+            assert_eq!(hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(), 192);
+        }
+    }
+
+    #[test]
+    fn neon_agrees_with_classic() {
+        use crate::classic::hamming_distance_string_classic;
+        let a = "0123456789abcdef".repeat(8); // 128 chars
+        let b = "fedcba9876543210".repeat(8);
+        unsafe {
+            assert_eq!(
+                hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(),
+                hamming_distance_string_classic(a.as_bytes(), b.as_bytes()).unwrap()
+            );
+            assert_eq!(
+                hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(),
+                hamming_distance_string_classic(a.as_bytes(), b.as_bytes()).unwrap()
+            );
+        }
+    }
+}

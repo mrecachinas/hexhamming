@@ -80,3 +80,47 @@ pub(crate) fn hamming_distance_bytes_native(a: &[u8], b: &[u8], max_dist: i64) -
         1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popcnt64_matches_count_ones() {
+        // Verify native matches std count_ones for various values
+        for x in [0u64, 1, 0xFF, 0xDEADBEEF, 0xFFFFFFFFFFFFFFFF, 0x123456789ABCDEF0] {
+            assert_eq!(popcnt64_native(x), x.count_ones() as u64);
+        }
+    }
+
+    #[test]
+    fn bytes_native_full_distance() {
+        assert_eq!(hamming_distance_bytes_native(b"\xff", b"\x00", -1), 8);
+        assert_eq!(hamming_distance_bytes_native(b"\x00\x00", b"\x00\x00", -1), 0);
+        // 64 bytes to exercise 32-byte unrolled loop
+        let a = vec![0xFFu8; 64];
+        let b = vec![0x00u8; 64];
+        assert_eq!(hamming_distance_bytes_native(&a, &b, -1), 512);
+    }
+
+    #[test]
+    fn bytes_native_with_max_dist() {
+        assert_eq!(hamming_distance_bytes_native(b"\xff", b"\xfe", 2), 1);
+        assert_eq!(hamming_distance_bytes_native(b"\xff", b"\x00", 2), 0);
+    }
+
+    #[test]
+    fn bytes_native_agrees_with_classic() {
+        use crate::classic::hamming_distance_bytes_classic;
+        // Test various sizes to cover all loop paths
+        for size in [1, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 127] {
+            let a: Vec<u8> = (0..size).map(|i| i as u8).collect();
+            let b: Vec<u8> = (0..size).map(|i| (i as u8).wrapping_add(1)).collect();
+            assert_eq!(
+                hamming_distance_bytes_native(&a, &b, -1),
+                hamming_distance_bytes_classic(&a, &b, -1),
+                "mismatch at size {size}"
+            );
+        }
+    }
+}

@@ -228,3 +228,70 @@ pub fn set_algorithm(algo_name: &str) -> Result<(), &'static str> {
         _ => Err("unknown algorithm"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_algorithm_classic_and_native() {
+        set_algorithm("classic").unwrap();
+        assert_eq!(hex_hamming_distance("deadbeef", "00000000").unwrap(), 24);
+        set_algorithm("native").unwrap();
+        assert_eq!(hex_hamming_distance("deadbeef", "00000000").unwrap(), 24);
+    }
+
+    #[test]
+    fn set_algorithm_unknown() {
+        assert!(set_algorithm("bogus").is_err());
+    }
+
+    #[test]
+    fn bytes_within_dist_basic() {
+        assert_eq!(bytes_within_dist(b"\xff", b"\xfe", 2).unwrap(), true);
+        assert_eq!(bytes_within_dist(b"\xff", b"\x00", 2).unwrap(), false);
+    }
+
+    #[test]
+    fn bytes_within_dist_errors() {
+        assert!(bytes_within_dist(b"", b"\xff", 1).is_err());
+        assert!(bytes_within_dist(b"\xff", b"\xff\x00", 1).is_err());
+    }
+
+    #[test]
+    fn array_first_within_dist_test() {
+        let big = b"\xaa\xbb\xcc\xff";
+        let small = b"\xff";
+        // \xaa vs \xff = dist 4, within max_dist 4
+        assert_eq!(bytes_array_first_within_dist(big, small, 4).unwrap(), Some(0));
+        // Only exact match at index 3
+        assert_eq!(bytes_array_first_within_dist(big, small, 0).unwrap(), Some(3));
+        // dist(\x00, \xff) = 8, exceeds max_dist 1
+        assert_eq!(bytes_array_first_within_dist(b"\x00", b"\xff", 1).unwrap(), None);
+    }
+
+    #[test]
+    fn array_best_within_dist() {
+        // \xfe is distance 1 from \xff, \xaa is distance 4
+        let big = b"\xaa\xfe\xff";
+        let small = b"\xff";
+        let result = bytes_array_best_within_dist(big, small, 8).unwrap();
+        assert_eq!(result, Some((0, 2))); // exact match at index 2
+    }
+
+    #[test]
+    fn array_all_within_dist() {
+        let big = b"\xaa\xfe\xff";
+        let small = b"\xff";
+        let result = bytes_array_all_within_dist(big, small, 8).unwrap();
+        assert_eq!(result.len(), 3);
+        // Last entry should be exact match
+        assert_eq!(result[2], (0, 2));
+    }
+
+    #[test]
+    fn array_errors() {
+        assert!(bytes_array_first_within_dist(b"\xff", b"", 1).is_err()); // empty small
+        assert!(bytes_array_first_within_dist(b"\xaa\xbb\xcc", b"\xff\xff", 1).is_err()); // not a multiple
+    }
+}
