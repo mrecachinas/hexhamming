@@ -554,103 +554,156 @@ mod x86_simd {
         }
     }
 
-    /// SSE4.1 implementation for hex strings - optimized with batched popcount
+    /// Branchless vectorized hex ASCII → nibble conversion for SSE4.1.
+    /// Same subtract-and-correct strategy as the NEON version:
+    ///   1. digit_val = c - '0': digits → 0-9
+    ///   2. letter_val = (c & 0xDF) - '0' - 7: letters → 10-15
+    ///   3. Select letter path where digit_val > 9
+    ///   4. Force invalid where letter result < 10 (catches '@', '`')
+    #[inline]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn hex_parse_sse(
+        chars: __m128i,
+        case_mask: __m128i,
+        ascii_0: __m128i,
+        seven: __m128i,
+        nine: __m128i,
+        ten: __m128i,
+    ) -> __m128i {
+        let digit_val = _mm_sub_epi8(chars, ascii_0);
+        let letter_val = _mm_sub_epi8(_mm_and_si128(chars, case_mask), ascii_0);
+        let is_letter = _mm_cmpgt_epi8(digit_val, nine);
+        let adjusted = _mm_sub_epi8(letter_val, seven);
+        let result = _mm_blendv_epi8(digit_val, adjusted, is_letter);
+        // Force lanes invalid where letter path produced < 10 (e.g. '@' → 9)
+        let bad_letter = _mm_and_si128(is_letter, _mm_cmplt_epi8(adjusted, ten));
+        _mm_or_si128(result, bad_letter)
+    }
+
+    /// SSE4.1 pack-to-bytes implementation for hex strings.
+    /// Parses 32 hex chars (2×16) → nibbles, XORs, packs pairs into bytes,
+    /// then uses hardware popcnt on u64 extracts.
     #[target_feature(enable = "sse4.1", enable = "popcnt")]
     pub unsafe fn hamming_distance_string_sse(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
         let length = a.len();
         
-        // For short strings, scalar with lookup table is competitive
         if length < 32 {
             return hamming_distance_string_classic(a, b);
         }
 
         let zero = _mm_setzero_si128();
         let fifteen = _mm_set1_epi8(15);
-        let subtract0vec = _mm_set1_epi8(b'0' as i8);
-        let subtract55vec = _mm_set1_epi8(55);
-        let andvec = _mm_set1_epi8(!0x20i8);
-        let isdigit_mask = _mm_set1_epi8(b'9' as i8);
-        
-        // Popcount lookup table
-        let popcnt_mask = _mm_set1_epi8(0x0F);
-        let popcnt_table = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+        let case_mask = _mm_set1_epi8(!0x20i8);     // 0xDF
+        let ascii_0 = _mm_set1_epi8(b'0' as i8);
+        let seven = _mm_set1_epi8(7);
+        let nine = _mm_set1_epi8(9);
+        let ten = _mm_set1_epi8(10);
 
         let mut i = 0;
-        let mut total = _mm_setzero_si128();
+        let mut difference: u64 = 0;
         
-        // Process 64 bytes at a time (4 x 16) with batched horizontal sum
-        while i + 64 <= length {
-            let mut acc = _mm_setzero_si128();
-            
-            for _ in 0..4 {
-                let a16 = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
-                let b16 = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+        // Process 32 hex chars at a time: parse→XOR→pack→popcnt
+        while i + 32 <= length {
+            let a_lo = hex_parse_sse(
+                _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_lo = hex_parse_sse(
+                _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let a_hi = hex_parse_sse(
+                _mm_loadu_si128(a.as_ptr().add(i + 16) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_hi = hex_parse_sse(
+                _mm_loadu_si128(b.as_ptr().add(i + 16) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
 
-                // Branchless hex parsing: x > '9' ? ((x & ~0x20) - 55) : (x - '0')
-                let a_cmp = _mm_cmpgt_epi8(a16, isdigit_mask);
-                let b_cmp = _mm_cmpgt_epi8(b16, isdigit_mask);
-
-                let a_letter = _mm_sub_epi8(_mm_and_si128(a16, andvec), subtract55vec);
-                let b_letter = _mm_sub_epi8(_mm_and_si128(b16, andvec), subtract55vec);
-
-                let a_digit = _mm_sub_epi8(a16, subtract0vec);
-                let b_digit = _mm_sub_epi8(b16, subtract0vec);
-
-                let a_hex = _mm_blendv_epi8(a_digit, a_letter, a_cmp);
-                let b_hex = _mm_blendv_epi8(b_digit, b_letter, b_cmp);
-
-                // Validate: all values must be 0-15
-                let invalid = _mm_or_si128(
-                    _mm_cmpgt_epi8(a_hex, fifteen),
-                    _mm_cmpgt_epi8(b_hex, fifteen)
-                );
-                let negative = _mm_or_si128(
-                    _mm_cmplt_epi8(a_hex, zero),
-                    _mm_cmplt_epi8(b_hex, zero)
-                );
-                if _mm_testz_si128(_mm_or_si128(invalid, negative), 
-                                  _mm_or_si128(invalid, negative)) == 0 {
-                    return Err("hex string contains invalid char");
-                }
-
-                // XOR and popcount using VPSHUFB
-                let xor = _mm_xor_si128(a_hex, b_hex);
-                acc = _mm_add_epi8(acc, _mm_shuffle_epi8(popcnt_table, 
-                    _mm_and_si128(xor, popcnt_mask)));
-                
-                i += 16;
-            }
-            total = _mm_add_epi64(total, _mm_sad_epu8(acc, zero));
-        }
-
-        // Process remaining 16-byte chunks
-        let mut acc = _mm_setzero_si128();
-        while i + 16 <= length {
-            let a16 = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
-            let b16 = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
-
-            let a_cmp = _mm_cmpgt_epi8(a16, isdigit_mask);
-            let b_cmp = _mm_cmpgt_epi8(b16, isdigit_mask);
-
-            let a_letter = _mm_sub_epi8(_mm_and_si128(a16, andvec), subtract55vec);
-            let b_letter = _mm_sub_epi8(_mm_and_si128(b16, andvec), subtract55vec);
-
-            let a_digit = _mm_sub_epi8(a16, subtract0vec);
-            let b_digit = _mm_sub_epi8(b16, subtract0vec);
-
-            let a_hex = _mm_blendv_epi8(a_digit, a_letter, a_cmp);
-            let b_hex = _mm_blendv_epi8(b_digit, b_letter, b_cmp);
-
+            // Validate all 4 vectors: any lane > 15 or < 0 (signed) means invalid
             let invalid = _mm_or_si128(
-                _mm_cmpgt_epi8(a_hex, fifteen),
-                _mm_cmpgt_epi8(b_hex, fifteen)
+                _mm_or_si128(
+                    _mm_cmpgt_epi8(a_lo, fifteen),
+                    _mm_cmpgt_epi8(b_lo, fifteen),
+                ),
+                _mm_or_si128(
+                    _mm_cmpgt_epi8(a_hi, fifteen),
+                    _mm_cmpgt_epi8(b_hi, fifteen),
+                ),
             );
             let negative = _mm_or_si128(
-                _mm_cmplt_epi8(a_hex, zero),
-                _mm_cmplt_epi8(b_hex, zero)
+                _mm_or_si128(
+                    _mm_cmplt_epi8(a_lo, zero),
+                    _mm_cmplt_epi8(b_lo, zero),
+                ),
+                _mm_or_si128(
+                    _mm_cmplt_epi8(a_hi, zero),
+                    _mm_cmplt_epi8(b_hi, zero),
+                ),
             );
-            if _mm_testz_si128(_mm_or_si128(invalid, negative),
-                              _mm_or_si128(invalid, negative)) == 0 {
+            let bad = _mm_or_si128(invalid, negative);
+            if _mm_testz_si128(bad, bad) == 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles
+            let xor_lo = _mm_xor_si128(a_lo, b_lo);
+            let xor_hi = _mm_xor_si128(a_hi, b_hi);
+
+            // Pack nibble pairs into bytes: even nibbles << 4 | odd nibbles
+            // Deinterleave even/odd using shuffle masks
+            let shuf_even = _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+            let shuf_odd  = _mm_setr_epi8(1, 3, 5, 7, 9, 11, 13, 15, -1, -1, -1, -1, -1, -1, -1, -1);
+
+            // From xor_lo (16 nibbles) → 8 bytes in low half
+            let even_lo = _mm_shuffle_epi8(xor_lo, shuf_even);
+            let odd_lo  = _mm_shuffle_epi8(xor_lo, shuf_odd);
+            // From xor_hi (16 nibbles) → 8 bytes in low half
+            let even_hi = _mm_shuffle_epi8(xor_hi, shuf_even);
+            let odd_hi  = _mm_shuffle_epi8(xor_hi, shuf_odd);
+
+            // Combine: [even_lo_8 | even_hi_8] and [odd_lo_8 | odd_hi_8]
+            // Use _mm_unpacklo_epi64 to merge the two 8-byte halves
+            let even = _mm_unpacklo_epi64(even_lo, even_hi);
+            let odd  = _mm_unpacklo_epi64(odd_lo, odd_hi);
+
+            // Pack: (even << 4) | odd
+            // _mm_slli_epi16 shifts 16-bit lanes, so bits leak across byte
+            // boundaries. Mask to keep only the high nibble per byte.
+            let hi_nib_mask = _mm_set1_epi8(0xF0u8 as i8);
+            let packed = _mm_or_si128(
+                _mm_and_si128(_mm_slli_epi16(even, 4), hi_nib_mask),
+                odd,
+            );
+
+            // Hardware popcnt on the 16 packed bytes (extract as two u64s)
+            let lo64 = _mm_cvtsi128_si64(packed) as u64;
+            let hi64 = _mm_extract_epi64(packed, 1) as u64;
+            difference += lo64.count_ones() as u64 + hi64.count_ones() as u64;
+
+            i += 32;
+        }
+
+        // Process remaining 16-byte chunks with shuffle-based popcount
+        let popcnt_mask = _mm_set1_epi8(0x0F);
+        let popcnt_table = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+        let mut acc = _mm_setzero_si128();
+        while i + 16 <= length {
+            let a_hex = hex_parse_sse(
+                _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+            let b_hex = hex_parse_sse(
+                _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i),
+                case_mask, ascii_0, seven, nine, ten,
+            );
+
+            let bad = _mm_or_si128(
+                _mm_cmpgt_epi8(a_hex, fifteen),
+                _mm_cmpgt_epi8(b_hex, fifteen),
+            );
+            if _mm_testz_si128(bad, bad) == 0 {
                 return Err("hex string contains invalid char");
             }
 
@@ -660,22 +713,21 @@ mod x86_simd {
             
             i += 16;
         }
-        total = _mm_add_epi64(total, _mm_sad_epu8(acc, zero));
+        let sad = _mm_sad_epu8(acc, zero);
+        difference += (_mm_extract_epi64(sad, 0) + _mm_extract_epi64(sad, 1)) as u64;
 
-        let mut result = (_mm_extract_epi64(total, 0) + _mm_extract_epi64(total, 1)) as u64;
-
-        // Handle remaining bytes with optimized scalar code
+        // Scalar tail
         while i < length {
             let val1 = hex_char_to_nibble(*a.get_unchecked(i));
             let val2 = hex_char_to_nibble(*b.get_unchecked(i));
             if (val1 | val2) & 0xF0 != 0 {
                 return Err("hex string contains invalid char");
             }
-            result += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+            difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
             i += 1;
         }
 
-        Ok(result)
+        Ok(difference)
     }
 }
 
@@ -820,6 +872,102 @@ mod neon_simd {
         let bad_letter = vandq_u8(is_letter, vcltq_u8(adjusted, ten));
         vorrq_u8(result, bad_letter)
     }
+    /// Alternative: parse 32 hex chars → pack into 16 bytes → use vcntq_u8.
+    /// Processes 32 hex chars per iteration (vs 16 in the nibble approach),
+    /// and replaces the vqtbl1q popcount lookup with the native vcntq_u8
+    /// instruction which counts all 8 bits per byte in a single cycle.
+    #[inline]
+    pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+        let length = a.len();
+
+        if length < 32 {
+            return hamming_distance_string_neon(a, b);
+        }
+
+        let fifteen_u = vdupq_n_u8(15);
+        let case_mask = vdupq_n_u8(0xDF);
+        let ascii_0 = vdupq_n_u8(b'0');
+        let seven = vdupq_n_u8(7);
+        let nine = vdupq_n_u8(9);
+        let ten = vdupq_n_u8(10);
+        let four = vdupq_n_s8(4);
+
+        let mut i = 0usize;
+        let mut difference: u64 = 0;
+
+        // Process 32 hex chars at a time:
+        //   Load 32 chars (2×16), parse to nibbles, pack pairs into bytes,
+        //   XOR the packed bytes, vcntq_u8 popcount.
+        while i + 32 <= length {
+            // Parse first 16 hex chars → nibbles
+            let a_lo = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+            let b_lo = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+            // Parse next 16 hex chars → nibbles
+            let a_hi = hex_parse_neon(vld1q_u8(a.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
+            let b_hi = hex_parse_neon(vld1q_u8(b.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
+
+            // Validate all 4 vectors
+            let bad = vorrq_u8(
+                vorrq_u8(vcgtq_u8(a_lo, fifteen_u), vcgtq_u8(b_lo, fifteen_u)),
+                vorrq_u8(vcgtq_u8(a_hi, fifteen_u), vcgtq_u8(b_hi, fifteen_u)),
+            );
+            if vmaxvq_u8(bad) != 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles first (before packing — same result, fewer packs)
+            let xor_lo = veorq_u8(a_lo, b_lo);  // 16 nibble XOR results
+            let xor_hi = veorq_u8(a_hi, b_hi);  // 16 nibble XOR results
+
+            // Pack: interleave even/odd nibbles into bytes
+            // xor_lo has nibbles [0,1,2,3,...,15], xor_hi has [16,17,...,31]
+            // We want bytes where each byte = (nibble[2k] << 4) | nibble[2k+1]
+            // Use UZP to deinterleave even/odd lanes, then shift+OR
+            let even_lo = vuzp1q_u8(xor_lo, xor_hi);  // even indices: 0,2,4,...
+            let odd_lo = vuzp2q_u8(xor_lo, xor_hi);   // odd indices: 1,3,5,...
+            // Shift even nibbles left 4 bits via reinterpret + signed shift
+            let packed = vorrq_u8(
+                vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
+                odd_lo,
+            );
+
+            // Now packed has 16 bytes, each containing two XOR'd nibbles
+            // vcntq_u8 counts all set bits per byte — exactly what we want
+            let cnt = vcntq_u8(packed);
+            // Horizontal sum
+            difference += vaddlvq_u8(cnt) as u64;
+
+            i += 32;
+        }
+
+        // Handle remaining chars with the nibble-based approach
+        while i + 16 <= length {
+            let a_nib = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+            let b_nib = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+            let bad = vorrq_u8(vcgtq_u8(a_nib, fifteen_u), vcgtq_u8(b_nib, fifteen_u));
+            if vmaxvq_u8(bad) != 0 {
+                return Err("hex string contains invalid char");
+            }
+            let xor = veorq_u8(a_nib, b_nib);
+            let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
+            let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+            difference += vaddlvq_u8(cnt) as u64;
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < length {
+            let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+            let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+            if (val1 | val2) & 0xF0 != 0 {
+                return Err("hex string contains invalid char");
+            }
+            difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+            i += 1;
+        }
+
+        Ok(difference)
+    }
 }
 
 /// Dispatch to appropriate byte distance implementation based on current algorithm
@@ -876,7 +1024,7 @@ fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64, &'static 
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
         if algo == ALGO_NEON || algo == ALGO_NATIVE {
-            return unsafe { neon_simd::hamming_distance_string_neon(a, b) };
+            return unsafe { neon_simd::hamming_distance_string_neon_pack(a, b) };
         }
     }
 
@@ -1273,4 +1421,79 @@ pub fn bytes_hamming_distance(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
         return Ok(0);
     }
     Ok(hamming_distance_bytes_dispatch(a, b, -1))
+}
+
+/// Experimental: hex hamming distance using pack-to-bytes approach.
+/// Parses 32 hex chars → 16 packed bytes, then uses vcntq_u8.
+#[cfg(target_arch = "aarch64")]
+pub fn hex_hamming_distance_pack(a: &str, b: &str) -> Result<u64, &'static str> {
+    if a.len() != b.len() {
+        return Err("strings are NOT the same length");
+    }
+    if a.is_empty() {
+        return Ok(0);
+    }
+    unsafe { neon_simd::hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_hamming() {
+        assert_eq!(hex_hamming_distance("deadbeef", "00000000").unwrap(), 24);
+        assert_eq!(hex_hamming_distance("ffff", "0000").unwrap(), 16);
+        assert_eq!(hex_hamming_distance("0000", "0000").unwrap(), 0);
+        assert_eq!(hex_hamming_distance("f", "0").unwrap(), 4);
+    }
+
+    #[test]
+    fn test_mixed_case() {
+        assert_eq!(hex_hamming_distance("DEADBEEF", "deadbeef").unwrap(), 0);
+        assert_eq!(hex_hamming_distance("AbCdEf", "abcdef").unwrap(), 0);
+        assert_eq!(hex_hamming_distance("aAbBcC", "AABBCC").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_long_strings_32plus() {
+        // 32 chars — exercises the pack/32-char loop
+        let a32 = "f".repeat(32);
+        let b32 = "0".repeat(32);
+        assert_eq!(hex_hamming_distance(&a32, &b32).unwrap(), 128);
+
+        // 64 chars
+        let a64 = "f".repeat(64);
+        let b64 = "0".repeat(64);
+        assert_eq!(hex_hamming_distance(&a64, &b64).unwrap(), 256);
+
+        // 254 chars — exercises loop + tail
+        let a254 = "f".repeat(254);
+        let b254 = "0".repeat(254);
+        assert_eq!(hex_hamming_distance(&a254, &b254).unwrap(), 1016);
+    }
+
+    #[test]
+    fn test_invalid_chars() {
+        assert!(hex_hamming_distance("zz", "00").is_err());
+        assert!(hex_hamming_distance("gg", "00").is_err());
+        assert!(hex_hamming_distance("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@", "00000000000000000000000000000000ff").is_err());
+        assert!(hex_hamming_distance("``````````````````````````````````", "00000000000000000000000000000000ff").is_err());
+    }
+
+    #[test]
+    fn test_length_mismatch() {
+        assert!(hex_hamming_distance("ff", "f").is_err());
+    }
+
+    #[test]
+    fn test_empty() {
+        assert_eq!(hex_hamming_distance("", "").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_bytes_basic() {
+        assert_eq!(bytes_hamming_distance(b"\xff", b"\x00").unwrap(), 8);
+        assert_eq!(bytes_hamming_distance(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00").unwrap(), 24);
+    }
 }

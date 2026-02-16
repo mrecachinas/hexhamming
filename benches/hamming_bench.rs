@@ -1,6 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use hexhamming::{bytes_hamming_distance, hex_hamming_distance};
 
+#[cfg(target_arch = "aarch64")]
+use hexhamming::hex_hamming_distance_pack;
+
 fn bench_hex_string(c: &mut Criterion) {
     let mut group = c.benchmark_group("hex_hamming_distance");
     for size in [16, 32, 64, 128, 254] {
@@ -8,6 +11,19 @@ fn bench_hex_string(c: &mut Criterion) {
         let b = "0".repeat(size);
         group.bench_function(format!("{size} chars"), |bencher| {
             bencher.iter(|| hex_hamming_distance(black_box(&a), black_box(&b)))
+        });
+    }
+    group.finish();
+}
+
+#[cfg(target_arch = "aarch64")]
+fn bench_hex_string_pack(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hex_hamming_distance_pack");
+    for size in [32, 64, 128, 254] {
+        let a = "f".repeat(size);
+        let b = "0".repeat(size);
+        group.bench_function(format!("{size} chars"), |bencher| {
+            bencher.iter(|| hex_hamming_distance_pack(black_box(&a), black_box(&b)))
         });
     }
     group.finish();
@@ -25,5 +41,8 @@ fn bench_bytes(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(target_arch = "aarch64")]
+criterion_group!(benches, bench_hex_string, bench_hex_string_pack, bench_bytes);
+#[cfg(not(target_arch = "aarch64"))]
 criterion_group!(benches, bench_hex_string, bench_bytes);
 criterion_main!(benches);
