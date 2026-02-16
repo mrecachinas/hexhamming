@@ -182,11 +182,39 @@ immutable that is a very slow operation. Use a ``bytearray`` instead, and cast i
 Benchmark
 ---------
 
-Below is a benchmark using ``pytest-benchmark`` with hexhamming v3.0.0
-on Apple M-series (ARM64) with Python 3.14 and ``rustc`` 1.85.
+All benchmarks on Apple M-series (ARM64) with hexhamming v3.0.0, ``rustc`` 1.85, Python 3.14.
 
-String and bytes hamming distance
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Raw Rust (no Python overhead)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These numbers show the pure computation time using Rust's ``criterion`` benchmarks
+(``cargo bench --no-default-features``), with no Python/PyO3 overhead.
+
+===========================================  ===========
+Name                                           Mean (ns)
+===========================================  ===========
+hex_string (NEON) [16 chars]                        2.0
+hex_string (NEON) [64 chars]                        5.7
+hex_string (NEON) [128 chars]                      11.0
+hex_string (NEON) [254 chars]                      20.9
+bytes (NEON) [8 bytes]                              1.1
+bytes (NEON) [32 bytes]                             1.3
+bytes (NEON) [64 bytes]                             2.0
+bytes (NEON) [127 bytes]                            5.2
+bytes_within_dist [127 bytes]                       1.6
+array first [512×16, at start]                      2.5
+array first [512×16, at end]                      525.0
+array best [512×16]                             1,419.0
+array all [512×16]                                535.0
+array first [16384×64, at mid]                  8,430.0
+array best [16384×64]                          42,981.0
+array all [16384×64]                           16,400.0
+===========================================  ===========
+
+Python API (via PyO3)
+~~~~~~~~~~~~~~~~~~~~~
+
+These numbers include Python function call overhead (~45 ns) using ``pytest-benchmark``.
 
 ======================================================  ===========  ==========
 Name                                                      Mean (ns)    Std (ns)
@@ -194,33 +222,20 @@ Name                                                      Mean (ns)    Std (ns)
 hamming_distance_string [3 chars, same]                       48.8        10.1
 hamming_distance_string [3 chars, diff]                       48.4         4.4
 hamming_distance_string [64 chars, diff]                      88.2        16.0
-hamming_distance_string [1000 chars, same]                   754.7       251.2
-hamming_distance_string [1000 chars, diff]                   762.3        75.7
-hamming_distance_string [1024 chars, same]                   775.1        62.8
 hamming_distance_string [1024 chars, diff]                   785.0       137.1
 hamming_distance_bytes [3 bytes, same]                        48.5         5.5
-hamming_distance_bytes [3 bytes, diff]                        49.0         5.2
 hamming_distance_bytes [64 bytes, diff]                       50.3         8.4
-hamming_distance_bytes [1000 bytes, same]                     64.9         5.4
-hamming_distance_bytes [1000 bytes, diff]                     64.9        11.7
-hamming_distance_bytes [1024 bytes, same]                     63.2        35.3
 hamming_distance_bytes [1024 bytes, diff]                     69.1        16.0
-check_bytes_within_dist [16 bytes]                            52.1         8.9
-check_bytes_within_dist [64 bytes]                            51.2        23.2
 check_bytes_within_dist [127 bytes]                           53.4         5.3
+first_within_dist [512×16, at start]                          70.0         6.3
+first_within_dist [512×16, at end]                           721.2        65.7
+first_within_dist [16384×64, at end]                      48,927.1     8,321.5
+best_within_dist [512×16]                                    759.2       108.4
+best_within_dist [16384×64]                               46,295.0     3,793.5
+all_within_dist [512×16]                                     776.3        70.9
+all_within_dist [16384×64]                                46,602.1     2,944.3
 ======================================================  ===========  ==========
 
-Array API (batch search)
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-===============================================================  =============  ============
-Name                                                               Mean (ns)      Std (ns)
-===============================================================  =============  ============
-first_within_dist [512 elems × 16B, match at start]                     70.0           6.3
-first_within_dist [512 elems × 16B, match at end]                      721.2          65.7
-first_within_dist [16384 elems × 64B, match at end]                 48,927.1       8,321.5
-best_within_dist [512 elems × 16B]                                     759.2         108.4
-best_within_dist [16384 elems × 64B]                                46,295.0       3,793.5
-all_within_dist [512 elems × 16B]                                      776.3          70.9
-all_within_dist [16384 elems × 64B]                                 46,602.1       2,944.3
-===============================================================  =============  ============
+For small inputs, Python call overhead dominates (~45 ns). For large inputs
+(1024+ chars, 16384-element arrays), computation dominates and Python overhead
+is negligible.
