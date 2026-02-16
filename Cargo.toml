@@ -1,0 +1,29 @@
+[package]
+name = "hexhamming"
+version = "2.4.0"
+edition = "2021"
+description = "Fast Hamming distance calculation for hexadecimal strings"
+license = "MIT"
+
+[lib]
+name = "hexhamming"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+python = ["pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "hamming_bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

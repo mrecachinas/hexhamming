@@ -424,6 +424,20 @@ def test_check_hexstrings_within_dist_bench(benchmark):
     benchmark(check_hexstrings_within_dist, "F" * 1000, "0" * 1000, 20)
 
 
+@pytest.mark.benchmark(group="hamming_distance_check_bytes_within_dist_bench")
+@pytest.mark.parametrize(
+    ("bytes1", "bytes2", "max_dist"),
+    (
+        (b"\x00" * 16, b"\x00" * 16, 0),
+        (b"\xff" * 64, b"\x00" * 64, 100),
+        (b"\xff" * 127, b"\x00" * 127, 500),
+    ),
+    ids=("16 bytes,d=0", "64 bytes,d=100", "127 bytes,d=500"),
+)
+def test_check_bytes_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
+    benchmark(check_bytes_within_dist, bytes1, bytes2, max_dist)
+
+
 @pytest.mark.benchmark(
     group="hamming_distance_check_bytes_arrays_first_within_dist_bench"
 )

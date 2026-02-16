@@ -10,216 +10,166 @@ on:
 
 jobs:
   build-and-test:
-    name: Testing with Python 3.${{ matrix.python_minor }} on Linux
-    runs-on: ubuntu-24.04
+    name: Testing on ${{ matrix.os }} with Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python_minor: [ "10" , "11" , "12" , "13" , "14" ]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4.2.2
-      - name: Install cibuildwheel
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel "twine>=6.1.0" "packaging>=24.2"
 
-      - name: 🛠 Build and Test Hexhamming Python C extension
-        run: cibuildwheel
-        env:
-          CIBW_BUILD: ${{ format('cp3{0}-manylinux_x86_64', matrix.python_minor) }}
-          CIBW_TEST_REQUIRES: pytest pytest-benchmark
-          CIBW_TEST_COMMAND: "pytest -s {project}/test"
-          CIBW_BUILD_VERBOSITY: 1
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
-      - name: Check built wheels
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin and test dependencies
         run: |
-          twine --version
-          twine check wheelhouse/*
+          python -m pip install --upgrade pip
+          pip install maturin pytest pytest-benchmark
+
+      - name: Build and install with maturin
+        shell: bash
+        run: |
+          maturin build --release
+          pip install target/wheels/*.whl
+
+      - name: Run tests
+        run: pytest -vls test/
 
   sdist:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
     name: Source distribution
-    runs-on: macos-14
-
-    steps:
-    - uses: actions/checkout@v4.2.2
-    - name: Install uv
-      uses: astral-sh/setup-uv@v5
-
-    - name: Install requirements
-      run: |
-        uv tool install check-manifest
-        uv tool install "twine>=6.1.0"
-        uv tool install build
-
-    - name: Run check-manifest
-      run: check-manifest
-
-    - name: Build sdist
-      run: uv build --sdist --out-dir wheelhouse
-
-    - name: Install from sdist
-      run: |
-        uv venv .venv
-        uv pip install --python .venv/bin/python wheelhouse/*.tar.gz
-
-    - name: Check sdist
-      run: |
-          twine --version
-          twine check wheelhouse/*
-
-    - name: Upload sdist
-      uses: actions/upload-artifact@v4.4.3
-      with:
-        name: sdist
-        path: wheelhouse/*.tar.gz
-
-  wheels_macos:
-    if: startsWith(github.ref, 'refs/tags')
-    needs: [build-and-test, sdist]
-    name: Build macOS ${{ matrix.cibw_python }} ${{ matrix.cibw_arch }} wheels
-    runs-on: macos-14
-    strategy:
-      fail-fast: true
-      matrix:
-        cibw_python: [ "cp310", "cp311", "cp312", "cp313", "cp314" ]
-        cibw_arch: [ "x86_64", "arm64" ]
-
-    steps:
-    - uses: actions/checkout@v4.2.2
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: Install cibuildwheel
-      run: |
-        python3 -m pip install --upgrade pip
-        python3 -m pip install cibuildwheel "twine>=6.1.0" "packaging>=24.2"
-
-    - name: 🛠 Build Hexhamming Python C extension
-      run: cibuildwheel
-      env:
-        CIBW_BUILD: ${{ matrix.cibw_python }}-*
-        CIBW_ARCHS_MACOS: ${{ matrix.cibw_arch }}
-        CIBW_TEST_SKIP: "*-macosx_arm64"
-        CC: /usr/bin/clang
-        CXX: /usr/bin/clang++
-        CFLAGS: "-Wno-implicit-function-declaration"
-        CIBW_TEST_REQUIRES: pytest pytest-benchmark
-        CIBW_TEST_COMMAND: "pytest -s {project}/test"
-        CIBW_BUILD_VERBOSITY: 1
-
-    - name: Check built wheels
-      run: |
-          twine --version
-          twine check wheelhouse/*
-
-    - name: Upload built wheels
-      uses: actions/upload-artifact@v4.4.3
-      with:
-        name: wheels-macos-${{ matrix.cibw_arch }}-${{ matrix.cibw_python }}
-        path: wheelhouse/*.whl
-        if-no-files-found: error
-
-  wheels_linux:
-    if: startsWith(github.ref, 'refs/tags')
-    needs: [build-and-test, sdist]
-    name: Build ${{ matrix.cibw_buildlinux }} ${{ matrix.cibw_arch }} wheels
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: true
-      matrix:
-        cibw_buildlinux: [ manylinux, musllinux ]
-        cibw_arch: [ "x86_64", "aarch64" ]
-        cibw_python: [ "cp310", "cp311", "cp312", "cp313", "cp314" ]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4.2.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
+  wheels_linux:
+    if: startsWith(github.ref, 'refs/tags')
+    needs: build-and-test
+    name: Build Linux ${{ matrix.target }} wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [x86_64, aarch64]
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
       - name: Set up QEMU
-        if: matrix.cibw_arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3.2.0
+        if: matrix.target == 'aarch64'
+        uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: Install cibuildwheel
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel "twine>=6.1.0" "packaging>=24.2"
-
-      - name: 🛠 Build Hexhamming Python C extension
-        run: cibuildwheel
-        env:
-          CIBW_BUILD: ${{ format('{0}-{1}*', matrix.cibw_python, matrix.cibw_buildlinux) }}
-          CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
-          CIBW_TEST_REQUIRES: pytest pytest-benchmark
-          CIBW_TEST_COMMAND: "pytest -s {project}/test"
-          CIBW_BUILD_VERBOSITY: 1
-
-      - name: Check built wheels
-        run: |
-          twine --version
-          twine check wheelhouse/*
-
-      - name: Upload built wheels
-        uses: actions/upload-artifact@v4.4.3
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
         with:
-          name: wheels-linux-${{ matrix.cibw_buildlinux }}-${{ matrix.cibw_arch }}-${{ matrix.cibw_python }}
-          path: wheelhouse/*.whl
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+          before-script-linux: |
+            # Install Rust in manylinux container
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source $HOME/.cargo/env
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  wheels_macos:
+    if: startsWith(github.ref, 'refs/tags')
+    needs: build-and-test
+    name: Build macOS ${{ matrix.target }} wheels
+    runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [x86_64, aarch64]
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target == 'aarch64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          args: --release --out dist
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
           if-no-files-found: error
 
   wheels_windows:
     if: startsWith(github.ref, 'refs/tags')
-    needs: [build-and-test, sdist]
+    needs: build-and-test
     name: Build Windows wheels
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4.2.2
-      - name: Install cibuildwheel
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cibuildwheel "twine>=6.1.0" "packaging>=24.2"
 
-      - name: 🛠 Build Hexhamming Python C extension
-        run: cibuildwheel
-        env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-          CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_TEST_REQUIRES: pytest pytest-benchmark
-          CIBW_TEST_COMMAND: "pytest -s {project}/test"
-          CIBW_BUILD_VERBOSITY: 1
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist
 
-      - name: Check built wheels
-        run: |
-          twine --version
-          twine check wheelhouse/*
-
-      - name: Upload built wheels
-        uses: actions/upload-artifact@v4.4.3
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
         with:
           name: wheels-windows
-          path: wheelhouse/*.whl
+          path: dist/*.whl
           if-no-files-found: error
 
   publish-wheels:
     if: startsWith(github.ref, 'refs/tags')
-    needs: [wheels_macos, wheels_linux, wheels_windows]
+    needs: [sdist, wheels_linux, wheels_macos, wheels_windows]
     name: Publish wheels
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
 
     steps:
-    - name: Collect sdist and wheels
-      uses: actions/download-artifact@v4.1.8
-      with:
-        pattern: '{sdist,wheels-*}'
-        path: wheelhouse
-        merge-multiple: true
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
 
-    - name: Install twine
-      run: python -m pip install "twine>=6.1.0" "packaging>=24.2"
-
-    - name: 📦 Publish distribution to PyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: twine upload --skip-existing wheelhouse/*
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive dist/*

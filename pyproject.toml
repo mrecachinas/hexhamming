@@ -1,29 +1,31 @@
 [build-system]
-requires = ["setuptools>=77.0.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "hexhamming"
 version = "2.4.0"
 description = "Fast Hamming distance calculation for hexadecimal strings"
 readme = "README.rst"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "Michael Recachinas", email = "m.recachinas@gmail.com" }
 ]
-keywords = ["hamming", "distance", "simd"]
 classifiers = [
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
-    "Programming Language :: C",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
-requires-python = ">=3.10"
+keywords = ["hamming", "distance", "simd"]
 
 [project.urls]
 Homepage = "https://github.com/mrecachinas/hexhamming"
@@ -36,9 +38,9 @@ dev = [
     "pytest-benchmark",
 ]
 
-[tool.setuptools]
-zip-safe = false
-packages = []
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "hexhamming"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
@@ -48,7 +50,7 @@ ignore = ["uv.lock"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py38"
+target-version = "py310"
 
 [tool.ruff.format]
 quote-style = "double"

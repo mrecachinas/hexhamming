@@ -1,9 +1,12 @@
 include README.rst
 include LICENSE
+include Cargo.toml
 include pyproject.toml
+include requirements-dev.txt
+include pytest.ini
 
-graft test
 graft src
+graft test
 
 global-exclude *.pyc
 global-exclude *.pyo
