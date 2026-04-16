@@ -90,7 +90,7 @@ def test_hamming_distance_byte(hex1, hex2, expected):
 @pytest.mark.parametrize(
     "hex1,hex2,exception,msg",
     (
-        ("abc", 3, ValueError, "error occurred while parsing arguments"),
+        ("abc", 3, TypeError, "object cannot be"),
         ("abc", "a", ValueError, "strings are NOT the same length"),
         ("lol", "foo", ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", ValueError, "hex string contains invalid char"),
@@ -158,20 +158,20 @@ def test_check_bytes_within_dist(bytes1, bytes2, max_dist, expected):
             "000abcdef",
             "011abcdef",
             None,
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         (
             "000abcdef",
             "011abcdef",
             "HELLO",
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         ("000abcdef", "011abcdef", -1, ValueError, "`max_dist` must be >0"),
         ("000abcdef", "011abcdzz", 3, ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", 3, ValueError, "hex string contains invalid char"),
-        ("1f0abcdef", 3, 3, ValueError, "error occurred while parsing arguments"),
+        ("1f0abcdef", 3, 3, TypeError, "object cannot be"),
         ("011abcdef", "00", 3, ValueError, "strings are NOT the same length"),
     ),
 )
@@ -188,15 +188,15 @@ def test_check_hexstrings_within_dist_errors(hex1, hex2, max_dist, exception, ms
             b"\x00" * 16,
             b"\x00" * 16,
             None,
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         (
             b"\x00" * 16,
             b"\x00" * 16,
             "HELLO",
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
         (
@@ -245,15 +245,15 @@ def test_check_bytes_arrays_all_within_dist_invalid_values(
             b"\x00" * 16,
             b"\x00" * 16,
             None,
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         (
             b"\x00" * 16,
             b"\x00" * 16,
             "HELLO",
-            ValueError,
-            "error occurred while parsing arguments",
+            TypeError,
+            "object cannot be",
         ),
         (b"\x00" * 32, b"\x00" * 16, -1, ValueError, "`max_dist` must be >=0"),
         (
@@ -546,3 +546,151 @@ def test_check_bytes_arrays_best_within_dist_bench(benchmark, bytes1, bytes2, ma
 )
 def test_check_bytes_arrays_all_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
     benchmark(check_bytes_arrays_all_within_dist, bytes1, bytes2, max_dist)
+
+
+############################
+# Wave 2a: buffer-protocol tests (bytearray, memoryview)
+############################
+
+
+def test_hamming_distance_bytes_bytearray():
+    """bytearray inputs accepted via buffer protocol."""
+    a = bytearray(b"\xff\x00")
+    b = bytearray(b"\x00\xff")
+    assert hamming_distance_bytes(a, b) == 16
+
+
+def test_hamming_distance_bytes_memoryview():
+    """memoryview inputs accepted via buffer protocol."""
+    a = memoryview(b"\xff\x00")
+    b = memoryview(b"\x00\xff")
+    assert hamming_distance_bytes(a, b) == 16
+
+
+def test_check_bytes_within_dist_bytearray():
+    a = bytearray(b"\xff\x00")
+    b = bytearray(b"\xfe\x00")
+    assert check_bytes_within_dist(a, b, 2) is True
+    assert check_bytes_within_dist(a, b, 0) is False
+
+
+def test_check_bytes_within_dist_memoryview():
+    a = memoryview(b"\xff\x00")
+    b = memoryview(b"\xfe\x00")
+    assert check_bytes_within_dist(a, b, 2) is True
+
+
+def test_check_bytes_arrays_first_within_dist_bytearray():
+    big = bytearray(b"\xaa\xbb\xcc\xff")
+    small = bytearray(b"\xff")
+    assert check_bytes_arrays_first_within_dist(big, small, 4) == 0
+    assert check_bytes_arrays_first_within_dist(big, small, 0) == 3
+
+
+def test_check_bytes_arrays_best_within_dist_memoryview():
+    big = memoryview(b"\xaa\xfe\xff")
+    small = memoryview(b"\xff")
+    dist, idx = check_bytes_arrays_best_within_dist(big, small, 8)
+    assert (dist, idx) == (0, 2)
+
+
+def test_check_bytes_arrays_all_within_dist_bytearray():
+    big = bytearray(b"\xaa\xfe\xff")
+    small = bytearray(b"\xff")
+    result = check_bytes_arrays_all_within_dist(big, small, 8)
+    assert len(result) == 3
+    assert result[2] == (0, 2)
+
+
+try:
+    import numpy as np
+
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_hamming_distance_bytes_numpy():
+    """numpy uint8 arrays accepted via buffer protocol."""
+    a = np.array([0xFF, 0x00], dtype=np.uint8)
+    b = np.array([0x00, 0xFF], dtype=np.uint8)
+    assert hamming_distance_bytes(a, b) == 16
+
+
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_check_bytes_within_dist_numpy():
+    a = np.array([0xFF, 0x00], dtype=np.uint8)
+    b = np.array([0xFE, 0x00], dtype=np.uint8)
+    assert check_bytes_within_dist(a, b, 2) is True
+
+
+############################
+# Wave 2a: SIMD path for check_hexstrings_within_dist (len >= 64)
+############################
+
+
+def test_check_hexstrings_within_dist_simd_equal():
+    """Equal long strings → True (SIMD path, len == 64)."""
+    s = "a" * 64
+    assert check_hexstrings_within_dist(s, s, 0) is True
+
+
+def test_check_hexstrings_within_dist_simd_at_boundary():
+    """Strings differing in exactly max_dist bits → True."""
+    # 'f' vs '0' has hamming distance 4 per hex char
+    # 5 differing chars → distance 20
+    a = "f" * 5 + "0" * 59
+    b = "0" * 64
+    assert check_hexstrings_within_dist(a, b, 20) is True
+
+
+def test_check_hexstrings_within_dist_simd_over_boundary():
+    """Strings differing in max_dist + 1 bits → False."""
+    a = "f" * 5 + "0" * 59
+    b = "0" * 64
+    # distance is 20, max_dist 19 → False
+    assert check_hexstrings_within_dist(a, b, 19) is False
+
+
+def test_check_hexstrings_within_dist_simd_long():
+    """Very long strings (10000 chars, well above 64 threshold)."""
+    a = "f" * 10000
+    b = "0" * 10000
+    # distance = 40000
+    assert check_hexstrings_within_dist(a, b, 40000) is True
+    assert check_hexstrings_within_dist(a, b, 39999) is False
+
+
+def test_check_hexstrings_within_dist_simd_invalid_char():
+    """Invalid hex char in SIMD-length string raises ValueError."""
+    a = "f" * 63 + "g"
+    b = "0" * 64
+    # max_dist must be < 4*len (256) to avoid early-exit before SIMD dispatch
+    with pytest.raises(ValueError, match="hex string contains invalid char"):
+        check_hexstrings_within_dist(a, b, 3)
+
+
+############################
+# Wave 2a: set_algo behavior lock
+############################
+
+
+def test_set_algo_valid_returns_empty():
+    """set_algo returns empty string for valid algorithms."""
+    for algo in ("classic", "native"):
+        assert set_algo(algo) == ""
+
+
+def test_set_algo_invalid_returns_nonempty():
+    """set_algo returns non-empty error message for unknown algorithm."""
+    result = set_algo("bogus_algo")
+    assert len(result) > 0
+
+
+def test_set_algo_roundtrip():
+    """Verify set_algo + hamming_distance_string produces correct results."""
+    set_algo("classic")
+    assert hamming_distance_string("deadbeef", "00000000") == 24
+    set_algo("native")
+    assert hamming_distance_string("deadbeef", "00000000") == 24
