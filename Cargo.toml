@@ -15,6 +15,7 @@ python = ["pyo3"]
 
 [dependencies]
 pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
+rayon = "1.10"
 
 [dev-dependencies]
 criterion = "0.5"

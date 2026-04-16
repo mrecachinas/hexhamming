@@ -1,8 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use hexhamming::{
-    bytes_hamming_distance, bytes_within_dist,
-    bytes_array_first_within_dist, bytes_array_best_within_dist, bytes_array_all_within_dist,
-    hex_hamming_distance, set_algorithm,
+    bytes_array_all_within_dist, bytes_array_best_within_dist, bytes_array_first_within_dist,
+    bytes_hamming_distance, bytes_within_dist, hex_hamming_distance, set_algorithm,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -92,13 +91,17 @@ fn bench_array_api(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("array_api/512x16_match_at_0");
     group.bench_function("first", |bencher| {
-        bencher.iter(|| bytes_array_first_within_dist(black_box(&big), black_box(&small), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_first_within_dist(black_box(&big), black_box(&small), black_box(1))
+        })
     });
     group.bench_function("best", |bencher| {
-        bencher.iter(|| bytes_array_best_within_dist(black_box(&big), black_box(&small), black_box(1)))
+        bencher
+            .iter(|| bytes_array_best_within_dist(black_box(&big), black_box(&small), black_box(1)))
     });
     group.bench_function("all", |bencher| {
-        bencher.iter(|| bytes_array_all_within_dist(black_box(&big), black_box(&small), black_box(1)))
+        bencher
+            .iter(|| bytes_array_all_within_dist(black_box(&big), black_box(&small), black_box(1)))
     });
     group.finish();
 
@@ -108,13 +111,19 @@ fn bench_array_api(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("array_api/512x16_match_at_end");
     group.bench_function("first", |bencher| {
-        bencher.iter(|| bytes_array_first_within_dist(black_box(&big_end), black_box(&small), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_first_within_dist(black_box(&big_end), black_box(&small), black_box(1))
+        })
     });
     group.bench_function("best", |bencher| {
-        bencher.iter(|| bytes_array_best_within_dist(black_box(&big_end), black_box(&small), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_best_within_dist(black_box(&big_end), black_box(&small), black_box(1))
+        })
     });
     group.bench_function("all", |bencher| {
-        bencher.iter(|| bytes_array_all_within_dist(black_box(&big_end), black_box(&small), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_all_within_dist(black_box(&big_end), black_box(&small), black_box(1))
+        })
     });
     group.finish();
 
@@ -128,13 +137,48 @@ fn bench_array_api(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("array_api/16384x64_match_at_mid");
     group.bench_function("first", |bencher| {
-        bencher.iter(|| bytes_array_first_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_first_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1))
+        })
     });
     group.bench_function("best", |bencher| {
-        bencher.iter(|| bytes_array_best_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_best_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1))
+        })
     });
     group.bench_function("all", |bencher| {
-        bencher.iter(|| bytes_array_all_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1)))
+        bencher.iter(|| {
+            bytes_array_all_within_dist(black_box(&big_lg), black_box(&small_lg), black_box(1))
+        })
+    });
+    group.finish();
+
+    // 100_000 elements of 128 bytes — large batch to showcase parallel speedup
+    let elem_size_xl = 128usize;
+    let num_elements_xl = 100_000usize;
+    let small_xl = vec![0x00u8; elem_size_xl];
+    let mut big_xl = vec![0x03u8; elem_size_xl * num_elements_xl];
+    // Scatter matches at various positions
+    for &idx in &[100, 5_000, 25_000, 50_000, 75_000, 99_999] {
+        big_xl[idx * elem_size_xl..(idx + 1) * elem_size_xl].copy_from_slice(&small_xl);
+    }
+
+    let mut group = c.benchmark_group("array_api/100000x128_parallel");
+    group.sample_size(10);
+    group.bench_function("first", |bencher| {
+        bencher.iter(|| {
+            bytes_array_first_within_dist(black_box(&big_xl), black_box(&small_xl), black_box(1))
+        })
+    });
+    group.bench_function("best", |bencher| {
+        bencher.iter(|| {
+            bytes_array_best_within_dist(black_box(&big_xl), black_box(&small_xl), black_box(1))
+        })
+    });
+    group.bench_function("all", |bencher| {
+        bencher.iter(|| {
+            bytes_array_all_within_dist(black_box(&big_xl), black_box(&small_xl), black_box(1))
+        })
     });
     group.finish();
 }
@@ -153,7 +197,20 @@ fn bench_hex_string_pack(c: &mut Criterion) {
 }
 
 #[cfg(target_arch = "aarch64")]
-criterion_group!(benches, bench_hex_by_algo, bench_bytes_by_algo, bench_bytes_within_dist, bench_array_api, bench_hex_string_pack);
+criterion_group!(
+    benches,
+    bench_hex_by_algo,
+    bench_bytes_by_algo,
+    bench_bytes_within_dist,
+    bench_array_api,
+    bench_hex_string_pack
+);
 #[cfg(not(target_arch = "aarch64"))]
-criterion_group!(benches, bench_hex_by_algo, bench_bytes_by_algo, bench_bytes_within_dist, bench_array_api);
+criterion_group!(
+    benches,
+    bench_hex_by_algo,
+    bench_bytes_by_algo,
+    bench_bytes_within_dist,
+    bench_array_api
+);
 criterion_main!(benches);

@@ -1,7 +1,10 @@
 use crate::hex::hex_char_to_nibble;
 #[cfg(target_arch = "aarch64")]
 use crate::ALGO_NEON;
-use crate::{hamming_distance_bytes_dispatch, hamming_distance_string_dispatch, LOOKUP};
+use crate::{
+    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
+    hamming_distance_string_dispatch_with_max, LOOKUP,
+};
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
 use crate::{ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO};
@@ -123,11 +126,11 @@ fn check_hexstrings_within_dist(a: &str, b: &str, max_dist: i64) -> PyResult<boo
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
 
-    // §1: SIMD path for long inputs — compute full distance then compare
+    // §1: SIMD path for long inputs — compute distance with early-exit
     if a_bytes.len() >= 64 {
-        let dist =
-            hamming_distance_string_dispatch(a_bytes, b_bytes).map_err(PyValueError::new_err)?;
-        return Ok(dist <= max_dist_u64);
+        let dist = hamming_distance_string_dispatch_with_max(a_bytes, b_bytes, max_dist_u64)
+            .map_err(PyValueError::new_err)?;
+        return Ok(dist != u64::MAX);
     }
 
     // Scalar path with early termination for short inputs

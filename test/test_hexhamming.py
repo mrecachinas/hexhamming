@@ -666,9 +666,10 @@ def test_check_hexstrings_within_dist_simd_invalid_char():
     """Invalid hex char in SIMD-length string raises ValueError."""
     a = "f" * 63 + "g"
     b = "0" * 64
-    # max_dist must be < 4*len (256) to avoid early-exit before SIMD dispatch
+    # max_dist must be high enough that SIMD processes all chunks
+    # (including the one with invalid 'g') but < 4*len to avoid shortcut
     with pytest.raises(ValueError, match="hex string contains invalid char"):
-        check_hexstrings_within_dist(a, b, 3)
+        check_hexstrings_within_dist(a, b, 255)
 
 
 ############################
@@ -694,3 +695,47 @@ def test_set_algo_roundtrip():
     assert hamming_distance_string("deadbeef", "00000000") == 24
     set_algo("native")
     assert hamming_distance_string("deadbeef", "00000000") == 24
+
+
+# ---------------------------------------------------------------------------
+# check_hexstrings_within_dist: SIMD early-exit correctness + perf
+# ---------------------------------------------------------------------------
+
+
+def test_check_hexstrings_within_dist_long_random_correctness():
+    """1024-char random strings: correctness of the SIMD early-exit path."""
+    import secrets
+
+    for _ in range(20):
+        a = secrets.token_hex(512)  # 1024 hex chars
+        b = secrets.token_hex(512)
+        full_dist = hamming_distance_string(a, b)
+        # Within: max_dist >= actual distance
+        assert check_hexstrings_within_dist(a, b, full_dist) is True
+        assert check_hexstrings_within_dist(a, b, full_dist + 100) is True
+        # Not within: max_dist < actual distance (when distance > 0)
+        if full_dist > 0:
+            assert check_hexstrings_within_dist(a, b, full_dist - 1) is False
+        # Tight threshold
+        assert check_hexstrings_within_dist(a, b, 0) is (full_dist == 0)
+
+
+def test_check_hexstrings_within_dist_long_random_fast():
+    """1024-char random strings with tight max_dist: must be fast (<0.15 us)."""
+    import secrets
+    import time
+
+    a = secrets.token_hex(512)
+    c = secrets.token_hex(512)
+    n = 50000
+    # Warm up
+    for _ in range(5):
+        check_hexstrings_within_dist(a, c, 100)
+    t0 = time.perf_counter()
+    for _ in range(n):
+        check_hexstrings_within_dist(a, c, 100)
+    elapsed_us = (time.perf_counter() - t0) / n * 1e6
+    # Target: < 0.15 us (baseline was 0.095 us, regressed to ~0.19 us)
+    assert elapsed_us < 0.15, (
+        f"random+tight took {elapsed_us:.3f} us, expected < 0.15 us"
+    )

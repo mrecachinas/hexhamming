@@ -1,12 +1,15 @@
 use crate::{
-    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
-    ALGO_CLASSIC, ALGO_NATIVE,
+    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch, ALGO_CLASSIC, ALGO_NATIVE,
     CURRENT_ALGO,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
 
+use rayon::prelude::*;
 use std::sync::atomic::Ordering;
+
+/// Minimum total byte size of big_array before we use rayon parallel paths.
+const PAR_THRESHOLD_BYTES: usize = 64 * 1024;
 
 /// Calculate the bitwise hamming distance between two equal-length hex strings.
 ///
@@ -62,83 +65,179 @@ pub fn bytes_within_dist(a: &[u8], b: &[u8], max_dist: i64) -> Result<bool, &'st
     if a.len() != b.len() {
         return Err("array sizes need to be the same");
     }
-    Ok(hamming_distance_bytes_dispatch(a, b, max_dist) == 1)
+    Ok(hamming_distance_bytes_dispatch(a, b, max_dist) != u64::MAX)
 }
 
 /// Find the first element in a byte array within a specified Hamming distance.
 ///
 /// Returns the index of the first matching element, or `None`.
-pub fn bytes_array_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Option<usize>, &'static str> {
+pub fn bytes_array_first_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Result<Option<usize>, &'static str> {
     if small_array.is_empty() {
         return Err("elem_to_compare size must be >0");
     }
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    if big_array.len() < PAR_THRESHOLD_BYTES {
+        return Ok(serial_first_within_dist(big_array, small_array, max_dist));
+    }
+    let elem_size = small_array.len();
+    Ok(big_array
+        .par_chunks_exact(elem_size)
+        .enumerate()
+        .filter_map(|(i, chunk)| {
+            (hamming_distance_bytes_dispatch(chunk, small_array, max_dist) != u64::MAX).then_some(i)
+        })
+        .min())
+}
+
+fn serial_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Option<usize> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
     for i in 0..num_elements {
         let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
-        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) == 1 {
-            return Ok(Some(i));
+        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) != u64::MAX {
+            return Some(i);
         }
     }
-    Ok(None)
+    None
 }
 
 /// Find the element in a byte array with the smallest Hamming distance.
 ///
 /// Returns `Some((distance, index))` of the best match, or `None` if none within max_dist.
-pub fn bytes_array_best_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Option<(u64, usize)>, &'static str> {
+pub fn bytes_array_best_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Result<Option<(u64, usize)>, &'static str> {
     if small_array.is_empty() {
         return Err("elem_to_compare size must be >0");
     }
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    if big_array.len() < PAR_THRESHOLD_BYTES {
+        return Ok(serial_best_within_dist(big_array, small_array, max_dist));
+    }
+    let elem_size = small_array.len();
+    Ok(big_array
+        .par_chunks_exact(elem_size)
+        .enumerate()
+        .fold(
+            || None::<(u64, usize)>,
+            |acc, (i, chunk)| {
+                let threshold = acc
+                    .map(|(d, _)| (d as i64).saturating_sub(1))
+                    .unwrap_or(max_dist);
+                let d = hamming_distance_bytes_dispatch(chunk, small_array, threshold);
+                if d == u64::MAX {
+                    return acc;
+                }
+                match acc {
+                    None => Some((d, i)),
+                    Some((best_d, _)) if d < best_d => Some((d, i)),
+                    _ => acc,
+                }
+            },
+        )
+        .reduce(
+            || None,
+            |a, b| match (a, b) {
+                (None, x) | (x, None) => x,
+                (Some(x), Some(y)) => {
+                    if x.0 < y.0 {
+                        Some(x)
+                    } else if y.0 < x.0 {
+                        Some(y)
+                    } else if x.1 < y.1 {
+                        Some(x)
+                    } else {
+                        Some(y)
+                    }
+                }
+            },
+        ))
+}
+
+fn serial_best_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
-    let mut best_dist: i64 = -1;
-    let mut best_index: Option<usize> = None;
-
+    let mut best: Option<(u64, usize)> = None;
     for i in 0..num_elements {
         let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
-        let threshold = if best_dist >= 0 { best_dist - 1 } else { max_dist };
-        if hamming_distance_bytes_dispatch(chunk, small_array, threshold) == 0 {
+        let threshold = best
+            .map(|(d, _)| (d as i64).saturating_sub(1))
+            .unwrap_or(max_dist);
+        let d = hamming_distance_bytes_dispatch(chunk, small_array, threshold);
+        if d == u64::MAX {
             continue;
         }
-        let dist = hamming_distance_bytes_dispatch(chunk, small_array, -1) as i64;
-        if best_dist < 0 || dist < best_dist {
-            best_dist = dist;
-            best_index = Some(i);
+        if best.is_none() || d < best.unwrap().0 {
+            best = Some((d, i));
         }
     }
-    Ok(best_index.map(|idx| (best_dist as u64, idx)))
+    best
 }
 
 /// Find all elements in a byte array within a specified Hamming distance.
 ///
-/// Returns a Vec of `(distance, index)` tuples.
-pub fn bytes_array_all_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Result<Vec<(u64, usize)>, &'static str> {
+/// Returns a Vec of `(distance, index)` tuples in ascending index order.
+pub fn bytes_array_all_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Result<Vec<(u64, usize)>, &'static str> {
     if small_array.is_empty() {
         return Err("elem_to_compare size must be >0");
     }
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    if big_array.len() < PAR_THRESHOLD_BYTES {
+        return Ok(serial_all_within_dist(big_array, small_array, max_dist));
+    }
+    let elem_size = small_array.len();
+    let mut results: Vec<(u64, usize)> = big_array
+        .par_chunks_exact(elem_size)
+        .enumerate()
+        .filter_map(|(i, chunk)| {
+            let d = hamming_distance_bytes_dispatch(chunk, small_array, max_dist);
+            if d == u64::MAX {
+                None
+            } else {
+                Some((d, i))
+            }
+        })
+        .collect();
+    results.sort_unstable_by_key(|&(_, idx)| idx);
+    Ok(results)
+}
+
+fn serial_all_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
     let mut results = Vec::new();
-
     for i in 0..num_elements {
         let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
-        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) == 0 {
-            continue;
+        let d = hamming_distance_bytes_dispatch(chunk, small_array, max_dist);
+        if d != u64::MAX {
+            results.push((d, i));
         }
-        let dist = hamming_distance_bytes_dispatch(chunk, small_array, -1);
-        results.push((dist, i));
     }
-    Ok(results)
+    results
 }
 
 /// Experimental: hex hamming distance using pack-to-bytes approach.
@@ -170,7 +269,8 @@ pub fn set_algorithm(algo_name: &str) -> Result<(), &'static str> {
         "avx512" | "avx-512" => {
             #[cfg(target_arch = "x86_64")]
             {
-                if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+                if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg")
+                {
                     CURRENT_ALGO.store(ALGO_AVX512, Ordering::Relaxed);
                     return Ok(());
                 }
@@ -263,11 +363,20 @@ mod tests {
         let big = b"\xaa\xbb\xcc\xff";
         let small = b"\xff";
         // \xaa vs \xff = dist 4, within max_dist 4
-        assert_eq!(bytes_array_first_within_dist(big, small, 4).unwrap(), Some(0));
+        assert_eq!(
+            bytes_array_first_within_dist(big, small, 4).unwrap(),
+            Some(0)
+        );
         // Only exact match at index 3
-        assert_eq!(bytes_array_first_within_dist(big, small, 0).unwrap(), Some(3));
+        assert_eq!(
+            bytes_array_first_within_dist(big, small, 0).unwrap(),
+            Some(3)
+        );
         // dist(\x00, \xff) = 8, exceeds max_dist 1
-        assert_eq!(bytes_array_first_within_dist(b"\x00", b"\xff", 1).unwrap(), None);
+        assert_eq!(
+            bytes_array_first_within_dist(b"\x00", b"\xff", 1).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -292,6 +401,207 @@ mod tests {
     #[test]
     fn array_errors() {
         assert!(bytes_array_first_within_dist(b"\xff", b"", 1).is_err()); // empty small
-        assert!(bytes_array_first_within_dist(b"\xaa\xbb\xcc", b"\xff\xff", 1).is_err()); // not a multiple
+        assert!(bytes_array_first_within_dist(b"\xaa\xbb\xcc", b"\xff\xff", 1).is_err());
+        // not a multiple
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 2b: rayon parallelization regression tests
+    // -----------------------------------------------------------------------
+
+    /// Build a big array of `num_elements` chunks of size `elem_size`, all filled
+    /// with `fill_byte`, then overwrite specific indices with `match_bytes`.
+    fn make_batch(
+        elem_size: usize,
+        num_elements: usize,
+        fill_byte: u8,
+        match_indices: &[usize],
+        match_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut big = vec![fill_byte; elem_size * num_elements];
+        for &idx in match_indices {
+            big[idx * elem_size..(idx + 1) * elem_size].copy_from_slice(match_bytes);
+        }
+        big
+    }
+
+    #[test]
+    fn first_within_dist_small_batch() {
+        // Below PAR_THRESHOLD_BYTES → serial path
+        let elem_size = 4;
+        let n = 100; // 400 bytes < 64KB
+        let needle = vec![0x00u8; elem_size];
+        let big = make_batch(elem_size, n, 0xFF, &[50], &needle);
+        assert_eq!(
+            bytes_array_first_within_dist(&big, &needle, 0).unwrap(),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn first_within_dist_large_batch() {
+        // Above PAR_THRESHOLD_BYTES → parallel path
+        let elem_size = 16;
+        let n = 100_000; // 1.6 MB > 64KB
+        let needle = vec![0x00u8; elem_size];
+        let big = make_batch(elem_size, n, 0xFF, &[50], &needle);
+        assert_eq!(
+            bytes_array_first_within_dist(&big, &needle, 0).unwrap(),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn first_within_dist_parallel_returns_lowest_index() {
+        let elem_size = 16;
+        let n = 100_000;
+        let needle = vec![0x00u8; elem_size];
+        let big = make_batch(elem_size, n, 0xFF, &[50, 500, 5000, 50000], &needle);
+        // Must return 50, the lowest matching index
+        assert_eq!(
+            bytes_array_first_within_dist(&big, &needle, 0).unwrap(),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn best_within_dist_small_batch() {
+        let elem_size = 4;
+        let n = 100;
+        let needle = vec![0x00u8; elem_size];
+        // elem at index 30: 1 bit diff, elem at index 60: exact match
+        let mut big = vec![0xFFu8; elem_size * n];
+        big[60 * elem_size..(60 + 1) * elem_size].copy_from_slice(&needle);
+        let mut one_bit = vec![0x00u8; elem_size];
+        one_bit[0] = 0x01;
+        big[30 * elem_size..(30 + 1) * elem_size].copy_from_slice(&one_bit);
+
+        let result = bytes_array_best_within_dist(&big, &needle, 100).unwrap();
+        assert_eq!(result, Some((0, 60)));
+    }
+
+    #[test]
+    fn best_within_dist_large_batch() {
+        let elem_size = 16;
+        let n = 100_000;
+        let needle = vec![0x00u8; elem_size];
+        let mut big = vec![0xFFu8; elem_size * n];
+        // Place exact match at index 75000
+        big[75000 * elem_size..(75000 + 1) * elem_size].copy_from_slice(&needle);
+        // Place 1-bit diff at index 25000
+        let mut one_bit = vec![0x00u8; elem_size];
+        one_bit[0] = 0x01;
+        big[25000 * elem_size..(25000 + 1) * elem_size].copy_from_slice(&one_bit);
+
+        let result = bytes_array_best_within_dist(&big, &needle, 200).unwrap();
+        assert_eq!(result, Some((0, 75000)));
+    }
+
+    #[test]
+    fn best_within_dist_tiebreak_lowest_index() {
+        // Two elements with the same minimum distance — lower index must win.
+        let elem_size = 16;
+        let n = 100_000;
+        let needle = vec![0x00u8; elem_size];
+        let mut big = vec![0xFFu8; elem_size * n];
+        // Exact matches at indices 300 and 700
+        big[300 * elem_size..(300 + 1) * elem_size].copy_from_slice(&needle);
+        big[700 * elem_size..(700 + 1) * elem_size].copy_from_slice(&needle);
+
+        let result = bytes_array_best_within_dist(&big, &needle, 200).unwrap();
+        assert_eq!(result, Some((0, 300)));
+    }
+
+    #[test]
+    fn best_within_dist_tiebreak_lowest_index_small() {
+        // Same test but below threshold (serial path)
+        let elem_size = 4;
+        let n = 10;
+        let needle = vec![0x00u8; elem_size];
+        let mut big = vec![0xFFu8; elem_size * n];
+        big[3 * elem_size..(3 + 1) * elem_size].copy_from_slice(&needle);
+        big[7 * elem_size..(7 + 1) * elem_size].copy_from_slice(&needle);
+
+        let result = bytes_array_best_within_dist(&big, &needle, 200).unwrap();
+        assert_eq!(result, Some((0, 3)));
+    }
+
+    #[test]
+    fn all_within_dist_small_batch() {
+        let elem_size = 4;
+        let n = 100;
+        let needle = vec![0x00u8; elem_size];
+        let big = make_batch(elem_size, n, 0xFF, &[5, 20, 50, 99], &needle);
+        let result = bytes_array_all_within_dist(&big, &needle, 0).unwrap();
+        let indices: Vec<usize> = result.iter().map(|&(_, i)| i).collect();
+        assert_eq!(indices, vec![5, 20, 50, 99]);
+    }
+
+    #[test]
+    fn all_within_dist_large_batch_ordering() {
+        // Matches at specific indices in a large batch — must come back sorted by index.
+        let elem_size = 16;
+        let n = 100_000;
+        let needle = vec![0x00u8; elem_size];
+        let match_at = vec![5, 100, 200, 500, 50000, 99999];
+        let big = make_batch(elem_size, n, 0xFF, &match_at, &needle);
+        let result = bytes_array_all_within_dist(&big, &needle, 0).unwrap();
+        let indices: Vec<usize> = result.iter().map(|&(_, i)| i).collect();
+        assert_eq!(indices, match_at);
+    }
+
+    #[test]
+    fn serial_and_parallel_produce_identical_results_first() {
+        let elem_size = 8;
+        let needle = vec![0x00u8; elem_size];
+        let match_at = &[10, 50, 100];
+        // Small batch (serial)
+        let small_n = 200; // 1600 bytes
+        let big_small = make_batch(elem_size, small_n, 0xFF, match_at, &needle);
+        let serial = bytes_array_first_within_dist(&big_small, &needle, 0).unwrap();
+        // Large batch (parallel) — same logical positions
+        let large_n = 100_000;
+        let big_large = make_batch(elem_size, large_n, 0xFF, match_at, &needle);
+        let parallel = bytes_array_first_within_dist(&big_large, &needle, 0).unwrap();
+        assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn serial_and_parallel_produce_identical_results_best() {
+        let elem_size = 8;
+        let needle = vec![0x00u8; elem_size];
+        // Place elements with different distances
+        let mut small_big = vec![0xFFu8; elem_size * 200];
+        let mut large_big = vec![0xFFu8; elem_size * 100_000];
+
+        // exact match at 50, 1-bit at 30
+        let mut one_bit = vec![0x00u8; elem_size];
+        one_bit[0] = 0x01;
+        for big in [&mut small_big, &mut large_big] {
+            big[30 * elem_size..(30 + 1) * elem_size].copy_from_slice(&one_bit);
+            big[50 * elem_size..(50 + 1) * elem_size].copy_from_slice(&needle);
+        }
+
+        let serial = bytes_array_best_within_dist(&small_big, &needle, 200).unwrap();
+        let parallel = bytes_array_best_within_dist(&large_big, &needle, 200).unwrap();
+        assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn serial_and_parallel_produce_identical_results_all() {
+        let elem_size = 8;
+        let needle = vec![0x00u8; elem_size];
+        let match_at = &[5, 20, 50, 100];
+
+        let small_big = make_batch(elem_size, 200, 0xFF, match_at, &needle);
+        let large_big = make_batch(elem_size, 100_000, 0xFF, match_at, &needle);
+
+        let serial = bytes_array_all_within_dist(&small_big, &needle, 0).unwrap();
+        let parallel = bytes_array_all_within_dist(&large_big, &needle, 0).unwrap();
+        // Both should find the same 4 matches at same indices with same distances
+        assert_eq!(serial.len(), parallel.len());
+        for (s, p) in serial.iter().zip(parallel.iter()) {
+            assert_eq!(s, p);
+        }
     }
 }

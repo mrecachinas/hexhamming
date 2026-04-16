@@ -14,7 +14,11 @@ pub(crate) fn hex_char_to_nibble(c: u8) -> u8 {
 #[allow(dead_code)]
 pub(crate) fn hex_char_to_val(c: u8) -> Option<u8> {
     let val = hex_char_to_nibble(c);
-    if val == 0xFF { None } else { Some(val) }
+    if val == 0xFF {
+        None
+    } else {
+        Some(val)
+    }
 }
 
 #[cfg(test)]
