@@ -12,18 +12,18 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod api;
 mod classic;
 mod hex;
 mod native;
-#[cfg(target_arch = "x86_64")]
-mod x86_simd;
 #[cfg(target_arch = "aarch64")]
 mod neon_simd;
 #[cfg(feature = "python")]
 mod python;
-mod api;
 #[cfg(test)]
 mod tests;
+#[cfg(target_arch = "x86_64")]
+mod x86_simd;
 
 pub use api::*;
 
@@ -42,7 +42,9 @@ pub(crate) const HEX_LOOKUP: [u8; 256] = {
             b'a'..=b'f' => i - b'a' + 10,
             _ => 0xFF,
         };
-        if i == 255 { break; }
+        if i == 255 {
+            break;
+        }
         i += 1;
     }
     table
@@ -64,7 +66,7 @@ pub(crate) const ALGO_NEON: u8 = 4;
 #[allow(dead_code)]
 pub(crate) const SCALAR_THRESHOLD: usize = 16; // Below this, scalar may beat SIMD
 #[allow(dead_code)]
-pub(crate) const SSE_THRESHOLD: usize = 64;    // Use SSE for medium strings
+pub(crate) const SSE_THRESHOLD: usize = 64; // Use SSE for medium strings
 
 /// Current algorithm selection (global state)
 pub(crate) static CURRENT_ALGO: AtomicU8 = AtomicU8::new(ALGO_NATIVE);
@@ -106,11 +108,11 @@ pub(crate) fn hamming_distance_bytes_dispatch(a: &[u8], b: &[u8], max_dist: i64)
             }
         }
 
-        // On ARM64, NEON and native use the same optimized implementation
-        // Benchmarks show that Rust's auto-vectorized count_ones() on Apple Silicon
-        // is faster than handwritten NEON intrinsics (vcntq_u8 + horizontal sums)
+        // On ARM64, use dedicated NEON byte SIMD path with vcntq_u8.
+        // (Supersedes the previous "native is faster on Apple Silicon" hypothesis —
+        // we will benchmark; if pytest regressions are minor we keep this wired.)
         #[cfg(target_arch = "aarch64")]
-        ALGO_NEON => native::hamming_distance_bytes_native(a, b, max_dist),
+        ALGO_NEON => unsafe { neon_simd::hamming_distance_bytes_neon(a, b, max_dist) },
 
         _ => native::hamming_distance_bytes_native(a, b, max_dist),
     }
@@ -152,4 +154,65 @@ pub(crate) fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64
     }
 
     classic::hamming_distance_string_classic(a, b)
+}
+
+/// Dispatch to appropriate string distance implementation with early-exit at max_dist.
+/// Returns Ok(u64::MAX) when distance exceeds max_dist (sentinel value).
+#[inline(always)]
+pub(crate) fn hamming_distance_string_dispatch_with_max(
+    a: &[u8],
+    b: &[u8],
+    max_dist: u64,
+) -> Result<u64, &'static str> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+        if (algo == ALGO_AVX512 || algo == ALGO_NATIVE)
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return unsafe { x86_simd::hamming_distance_string_avx512_with_max(a, b, max_dist) };
+        }
+        if (algo == ALGO_AVX512 || algo == ALGO_AVX2 || algo == ALGO_NATIVE)
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return unsafe { x86_simd::hamming_distance_string_avx2_with_max(a, b, max_dist) };
+        }
+        if (algo == ALGO_AVX512 || algo == ALGO_AVX2 || algo == ALGO_SSE41 || algo == ALGO_NATIVE)
+            && is_x86_feature_detected!("sse4.1")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return unsafe { x86_simd::hamming_distance_string_sse_with_max(a, b, max_dist) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+        if algo == ALGO_NEON || algo == ALGO_NATIVE {
+            return unsafe {
+                neon_simd::hamming_distance_string_neon_pack_with_max(a, b, max_dist)
+            };
+        }
+    }
+
+    // Classic scalar fallback with early-exit
+    let length = a.len();
+    let mut difference: u64 = 0;
+    for i in 0..length {
+        unsafe {
+            let val1 = hex::hex_char_to_nibble(*a.get_unchecked(i));
+            let val2 = hex::hex_char_to_nibble(*b.get_unchecked(i));
+            if (val1 | val2) & 0xF0 != 0 {
+                return Err("hex string contains invalid char");
+            }
+            difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        }
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+    }
+    Ok(difference)
 }

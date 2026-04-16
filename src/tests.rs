@@ -1,4 +1,7 @@
-use crate::{hex_hamming_distance, bytes_hamming_distance};
+use crate::{
+    bytes_array_all_within_dist, bytes_array_best_within_dist, bytes_array_first_within_dist,
+    bytes_hamming_distance, bytes_within_dist, hex_hamming_distance,
+};
 
 #[test]
 fn test_basic_hamming() {
@@ -60,8 +63,16 @@ fn test_long_mixed_content() {
 fn test_invalid_chars() {
     assert!(hex_hamming_distance("zz", "00").is_err());
     assert!(hex_hamming_distance("gg", "00").is_err());
-    assert!(hex_hamming_distance("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@", "00000000000000000000000000000000ff").is_err());
-    assert!(hex_hamming_distance("``````````````````````````````````", "00000000000000000000000000000000ff").is_err());
+    assert!(hex_hamming_distance(
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "00000000000000000000000000000000ff"
+    )
+    .is_err());
+    assert!(hex_hamming_distance(
+        "``````````````````````````````````",
+        "00000000000000000000000000000000ff"
+    )
+    .is_err());
 }
 
 #[test]
@@ -77,5 +88,350 @@ fn test_empty() {
 #[test]
 fn test_bytes_basic() {
     assert_eq!(bytes_hamming_distance(b"\xff", b"\x00").unwrap(), 8);
-    assert_eq!(bytes_hamming_distance(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00").unwrap(), 24);
+    assert_eq!(
+        bytes_hamming_distance(b"\xde\xad\xbe\xef", b"\x00\x00\x00\x00").unwrap(),
+        24
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Wave-1 regression tests: dispatch contract, various lengths, within-dist API
+// ---------------------------------------------------------------------------
+
+/// Helper: compute expected byte Hamming distance between two byte slices
+/// using a simple scalar method (for oracle comparison).
+fn expected_byte_distance(a: &[u8], b: &[u8]) -> u64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones() as u64)
+        .sum()
+}
+
+#[test]
+fn test_dispatch_returns_actual_distance_various_lengths() {
+    // Exercise dispatch at many boundary lengths that tickle SIMD tails.
+    let lengths: &[usize] = &[1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 127, 128, 256, 1024];
+    for &len in lengths {
+        let a = vec![0xFFu8; len];
+        let b = vec![0x00u8; len];
+        let expected = len as u64 * 8;
+        let got = bytes_hamming_distance(&a, &b).unwrap();
+        assert_eq!(
+            got, expected,
+            "bytes distance mismatch for len={}: got {} expected {}",
+            len, got, expected
+        );
+
+        // With max_dist = -1 (unlimited) — should still return actual distance
+        let got_unlimited = crate::hamming_distance_bytes_dispatch(&a, &b, -1);
+        assert_eq!(
+            got_unlimited, expected,
+            "dispatch(-1) mismatch for len={}",
+            len
+        );
+
+        // With max_dist = expected + 10 — within threshold, should return actual
+        let got_within = crate::hamming_distance_bytes_dispatch(&a, &b, (expected + 10) as i64);
+        assert_eq!(
+            got_within, expected,
+            "dispatch(within) mismatch for len={}",
+            len
+        );
+    }
+}
+
+#[test]
+fn test_dispatch_returns_sentinel_when_exceeded() {
+    let lengths: &[usize] = &[1, 8, 16, 32, 64, 128, 256, 1024];
+    for &len in lengths {
+        let a = vec![0xFFu8; len];
+        let b = vec![0x00u8; len];
+        // max_dist = 0 should always be exceeded for non-identical inputs
+        let got = crate::hamming_distance_bytes_dispatch(&a, &b, 0);
+        assert_eq!(
+            got,
+            u64::MAX,
+            "expected u64::MAX for len={} with max_dist=0, got {}",
+            len,
+            got
+        );
+
+        // max_dist = 1 should also be exceeded (actual distance = len*8)
+        let got1 = crate::hamming_distance_bytes_dispatch(&a, &b, 1);
+        assert_eq!(
+            got1,
+            u64::MAX,
+            "expected u64::MAX for len={} with max_dist=1, got {}",
+            len,
+            got1
+        );
+    }
+}
+
+#[test]
+fn test_dispatch_partial_diff_various_lengths() {
+    // Only one byte differs → distance = popcount(0xFF) = 8
+    let lengths: &[usize] = &[1, 8, 16, 32, 64, 128, 256, 1024];
+    for &len in lengths {
+        let a = vec![0x00u8; len];
+        let mut b = vec![0x00u8; len];
+        b[0] = 0xFF;
+        let expected = 8u64;
+        let got = bytes_hamming_distance(&a, &b).unwrap();
+        assert_eq!(
+            got, expected,
+            "partial diff mismatch for len={}: got {} expected {}",
+            len, got, expected
+        );
+    }
+}
+
+#[test]
+fn test_dispatch_agrees_with_oracle() {
+    // Pseudo-random bytes to exercise diverse bit patterns
+    let lengths: &[usize] = &[7, 15, 31, 33, 63, 127, 255, 512];
+    for &len in lengths {
+        let a: Vec<u8> = (0..len).map(|i| (i * 37 + 13) as u8).collect();
+        let b: Vec<u8> = (0..len).map(|i| (i * 53 + 97) as u8).collect();
+        let expected = expected_byte_distance(&a, &b);
+        let got = bytes_hamming_distance(&a, &b).unwrap();
+        assert_eq!(
+            got, expected,
+            "oracle mismatch for len={}: got {} expected {}",
+            len, got, expected
+        );
+    }
+}
+
+#[test]
+fn test_bytes_within_dist_api() {
+    let a = b"\xde\xad\xbe\xef";
+    let b = b"\x00\x00\x00\x00";
+    // Actual distance = 24
+    assert!(bytes_within_dist(a, b, 24).unwrap());
+    assert!(bytes_within_dist(a, b, 30).unwrap());
+    assert!(!bytes_within_dist(a, b, 2).unwrap());
+    assert!(!bytes_within_dist(a, b, 0).unwrap());
+}
+
+#[test]
+fn test_bytes_array_first_within_dist_api() {
+    // 3 elements of 4 bytes each
+    let big = [
+        0x00u8, 0x00, 0x00, 0x00, // elem 0: all zeros
+        0xDE, 0xAD, 0xBE, 0xEF, // elem 1: 24 bits from zero
+        0xFF, 0xFF, 0xFF, 0xFF, // elem 2: 32 bits from zero
+    ];
+    let needle = [0x00u8, 0x00, 0x00, 0x00];
+    // max_dist=5 → only elem 0 qualifies (dist=0)
+    assert_eq!(
+        bytes_array_first_within_dist(&big, &needle, 5).unwrap(),
+        Some(0)
+    );
+    // max_dist=30 → elem 0 still first (dist=0 < 30)
+    assert_eq!(
+        bytes_array_first_within_dist(&big, &needle, 30).unwrap(),
+        Some(0)
+    );
+    // Check with needle that only matches elem 2
+    let needle2 = [0xFFu8, 0xFF, 0xFF, 0xFF];
+    assert_eq!(
+        bytes_array_first_within_dist(&big, &needle2, 5).unwrap(),
+        Some(2)
+    );
+}
+
+#[test]
+fn test_bytes_array_best_within_dist_api() {
+    // 3 elements: distances from needle=[0,0,0,0] are 0, 24, 32
+    let big = [
+        0xFFu8, 0xFF, 0xFF, 0xFF, // elem 0: dist 32
+        0x01, 0x00, 0x00, 0x00, // elem 1: dist 1
+        0x00, 0x00, 0x00, 0x00, // elem 2: dist 0
+    ];
+    let needle = [0x00u8, 0x00, 0x00, 0x00];
+    let result = bytes_array_best_within_dist(&big, &needle, 40).unwrap();
+    assert_eq!(result, Some((0, 2))); // elem 2 is best (dist=0)
+
+    // With tight threshold: max_dist=2 → elem 1 (dist=1) and elem 2 (dist=0) qualify, best is elem 2
+    let result2 = bytes_array_best_within_dist(&big, &needle, 2).unwrap();
+    assert_eq!(result2, Some((0, 2)));
+
+    // With max_dist=0 → only exact match (elem 2)
+    let result3 = bytes_array_best_within_dist(&big, &needle, 0).unwrap();
+    assert_eq!(result3, Some((0, 2)));
+}
+
+#[test]
+fn test_bytes_array_all_within_dist_api() {
+    let big = [
+        0x00u8, 0x00, 0x00, 0x00, // elem 0: dist 0
+        0x01, 0x00, 0x00, 0x00, // elem 1: dist 1
+        0xFF, 0xFF, 0xFF, 0xFF, // elem 2: dist 32
+    ];
+    let needle = [0x00u8, 0x00, 0x00, 0x00];
+    let results = bytes_array_all_within_dist(&big, &needle, 5).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], (0, 0)); // elem 0, dist 0
+    assert_eq!(results[1], (1, 1)); // elem 1, dist 1
+
+    // All within max_dist=40
+    let results_all = bytes_array_all_within_dist(&big, &needle, 40).unwrap();
+    assert_eq!(results_all.len(), 3);
+    assert_eq!(results_all[2], (32, 2)); // elem 2, dist 32
+}
+
+#[test]
+fn test_hex_string_various_lengths() {
+    // Exercise hex string path at lengths that hit different SIMD tiers
+    let lengths: &[usize] = &[1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 127, 128, 256, 1024];
+    for &len in lengths {
+        let a = "f".repeat(len);
+        let b = "0".repeat(len);
+        // Each hex char: f ^ 0 = 0xF → 4 bits
+        let expected = len as u64 * 4;
+        let got = hex_hamming_distance(&a, &b).unwrap();
+        assert_eq!(
+            got, expected,
+            "hex distance mismatch for len={}: got {} expected {}",
+            len, got, expected
+        );
+    }
+}
+
+#[test]
+fn test_hex_string_mixed_pattern_various_lengths() {
+    // Use a repeating pattern of "a5" so xor("a5", "00") = 0xA5 → popcount = 4
+    let lengths: &[usize] = &[2, 16, 32, 64, 128, 254, 256, 512, 1024];
+    for &len in lengths {
+        // Repeat "a5" to fill length (len must be even for this pattern)
+        let len_even = len & !1; // round down to even
+        let a = "a5".repeat(len_even / 2);
+        let b = "00".repeat(len_even / 2);
+        // a^0 = 0xA = 1010 → 2 bits, 5^0 = 0x5 = 0101 → 2 bits → 4 bits per 2 chars
+        let expected = (len_even / 2) as u64 * 4;
+        let got = hex_hamming_distance(&a, &b).unwrap();
+        assert_eq!(
+            got, expected,
+            "hex mixed pattern mismatch for len={}: got {} expected {}",
+            len_even, got, expected
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for hamming_distance_string_dispatch_with_max
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_string_dispatch_with_max_agrees_with_full() {
+    // _with_max(max=u64::MAX) should return same result as full dispatch
+    let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+    for &len in lengths {
+        let a = "f".repeat(len);
+        let b = "0".repeat(len);
+        let full = hex_hamming_distance(&a, &b).unwrap();
+        let with_max =
+            crate::hamming_distance_string_dispatch_with_max(a.as_bytes(), b.as_bytes(), u64::MAX)
+                .unwrap();
+        assert_eq!(
+            full, with_max,
+            "dispatch_with_max mismatch at len={}: full={} with_max={}",
+            len, full, with_max
+        );
+    }
+}
+
+#[test]
+fn test_string_dispatch_with_max_returns_sentinel() {
+    // Returns u64::MAX when actual distance > max_dist
+    let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+    for &len in lengths {
+        let a = "f".repeat(len);
+        let b = "0".repeat(len);
+        let result =
+            crate::hamming_distance_string_dispatch_with_max(a.as_bytes(), b.as_bytes(), 1)
+                .unwrap();
+        assert_eq!(
+            result,
+            u64::MAX,
+            "expected sentinel for len={}, got {}",
+            len,
+            result
+        );
+    }
+}
+
+#[test]
+fn test_string_dispatch_with_max_returns_actual() {
+    // Returns actual distance when <= max_dist
+    let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+    for &len in lengths {
+        let a = "f".repeat(len);
+        let b = "0".repeat(len);
+        let expected = len as u64 * 4;
+        let result = crate::hamming_distance_string_dispatch_with_max(
+            a.as_bytes(),
+            b.as_bytes(),
+            expected + 100,
+        )
+        .unwrap();
+        assert_eq!(
+            result, expected,
+            "mismatch at len={}: expected {} got {}",
+            len, expected, result
+        );
+    }
+}
+
+#[test]
+fn test_string_dispatch_with_max_invalid_chars() {
+    let a = "z".repeat(64);
+    let b = "0".repeat(64);
+    assert!(
+        crate::hamming_distance_string_dispatch_with_max(a.as_bytes(), b.as_bytes(), 100).is_err()
+    );
+}
+
+#[test]
+fn test_string_dispatch_with_max_mixed_pattern() {
+    // Mixed content with known distances
+    let lengths: &[usize] = &[64, 128, 256, 1024];
+    for &len in lengths {
+        let a = "0123456789abcdef".repeat(len / 16);
+        let b = "fedcba9876543210".repeat(len / 16);
+        let full = hex_hamming_distance(&a, &b).unwrap();
+
+        // Within threshold — returns actual
+        let result =
+            crate::hamming_distance_string_dispatch_with_max(a.as_bytes(), b.as_bytes(), full + 10)
+                .unwrap();
+        assert_eq!(result, full, "within-threshold mismatch at len={}", len);
+
+        // Exactly at threshold
+        let result_exact =
+            crate::hamming_distance_string_dispatch_with_max(a.as_bytes(), b.as_bytes(), full)
+                .unwrap();
+        assert_eq!(
+            result_exact, full,
+            "exact-threshold mismatch at len={}",
+            len
+        );
+
+        // Below threshold — returns sentinel
+        if full > 0 {
+            let result_below = crate::hamming_distance_string_dispatch_with_max(
+                a.as_bytes(),
+                b.as_bytes(),
+                full - 1,
+            )
+            .unwrap();
+            assert_eq!(
+                result_below,
+                u64::MAX,
+                "below-threshold should be sentinel at len={}",
+                len
+            );
+        }
+    }
 }

@@ -2,9 +2,166 @@
 
 use crate::classic::hamming_distance_string_classic;
 use crate::hex::hex_char_to_nibble;
+use crate::native::hamming_distance_bytes_native;
 use crate::LOOKUP;
 
 use std::arch::aarch64::*;
+
+/// NEON vectorized hamming distance for byte arrays.
+/// Processes 64 B per iter via 4× vld1q_u8(veorq)+vcntq_u8, accumulating
+/// into a uint8x16_t accumulator for up to 7 iterations (448 B) before
+/// one horizontal sum via vaddlvq_u8.  (Each iter adds up to 4×8=32 per
+/// lane; 7×32=224 < 255.)  Handles max_dist>=0 early-exit per §2.
+#[inline]
+pub(crate) unsafe fn hamming_distance_bytes_neon(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    let length = a.len();
+
+    // For small inputs, delegate to native (SIMD setup not worthwhile)
+    if length < 32 {
+        return hamming_distance_bytes_native(a, b, max_dist);
+    }
+
+    let mut i = 0usize;
+    let mut difference: u64 = 0;
+    let zero = vdupq_n_u8(0);
+
+    // Max safe inner iterations: 255 / (4*8) = 7  (7*32 = 224 < 255)
+    const BATCH: usize = 7;
+
+    if max_dist < 0 {
+        // Full distance — batch BATCH iterations of 64 B per horizontal sum
+        while i + 64 * BATCH <= length {
+            let mut acc = zero;
+            for _ in 0..BATCH {
+                let a0 = vld1q_u8(a.as_ptr().add(i));
+                let b0 = vld1q_u8(b.as_ptr().add(i));
+                let a1 = vld1q_u8(a.as_ptr().add(i + 16));
+                let b1 = vld1q_u8(b.as_ptr().add(i + 16));
+                let a2 = vld1q_u8(a.as_ptr().add(i + 32));
+                let b2 = vld1q_u8(b.as_ptr().add(i + 32));
+                let a3 = vld1q_u8(a.as_ptr().add(i + 48));
+                let b3 = vld1q_u8(b.as_ptr().add(i + 48));
+
+                let cnt0 = vcntq_u8(veorq_u8(a0, b0));
+                let cnt1 = vcntq_u8(veorq_u8(a1, b1));
+                let cnt2 = vcntq_u8(veorq_u8(a2, b2));
+                let cnt3 = vcntq_u8(veorq_u8(a3, b3));
+
+                acc = vaddq_u8(acc, vaddq_u8(vaddq_u8(cnt0, cnt1), vaddq_u8(cnt2, cnt3)));
+                i += 64;
+            }
+            difference += vaddlvq_u8(acc) as u64;
+        }
+
+        // Remaining 64-byte chunks (up to BATCH-1 iterations safe for u8 acc)
+        let mut acc = zero;
+        while i + 64 <= length {
+            let a0 = vld1q_u8(a.as_ptr().add(i));
+            let b0 = vld1q_u8(b.as_ptr().add(i));
+            let a1 = vld1q_u8(a.as_ptr().add(i + 16));
+            let b1 = vld1q_u8(b.as_ptr().add(i + 16));
+            let a2 = vld1q_u8(a.as_ptr().add(i + 32));
+            let b2 = vld1q_u8(b.as_ptr().add(i + 32));
+            let a3 = vld1q_u8(a.as_ptr().add(i + 48));
+            let b3 = vld1q_u8(b.as_ptr().add(i + 48));
+
+            let cnt0 = vcntq_u8(veorq_u8(a0, b0));
+            let cnt1 = vcntq_u8(veorq_u8(a1, b1));
+            let cnt2 = vcntq_u8(veorq_u8(a2, b2));
+            let cnt3 = vcntq_u8(veorq_u8(a3, b3));
+
+            acc = vaddq_u8(acc, vaddq_u8(vaddq_u8(cnt0, cnt1), vaddq_u8(cnt2, cnt3)));
+            i += 64;
+        }
+        difference += vaddlvq_u8(acc) as u64;
+
+        // 16-byte chunks
+        while i + 16 <= length {
+            let a16 = vld1q_u8(a.as_ptr().add(i));
+            let b16 = vld1q_u8(b.as_ptr().add(i));
+            difference += vaddlvq_u8(vcntq_u8(veorq_u8(a16, b16))) as u64;
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < length {
+            difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+            i += 1;
+        }
+        difference
+    } else {
+        // Early-exit path — check every BATCH iters of 64 B (448 B)
+        let max_dist_u64 = max_dist as u64;
+
+        while i + 64 * BATCH <= length {
+            let mut acc = zero;
+            for _ in 0..BATCH {
+                let a0 = vld1q_u8(a.as_ptr().add(i));
+                let b0 = vld1q_u8(b.as_ptr().add(i));
+                let a1 = vld1q_u8(a.as_ptr().add(i + 16));
+                let b1 = vld1q_u8(b.as_ptr().add(i + 16));
+                let a2 = vld1q_u8(a.as_ptr().add(i + 32));
+                let b2 = vld1q_u8(b.as_ptr().add(i + 32));
+                let a3 = vld1q_u8(a.as_ptr().add(i + 48));
+                let b3 = vld1q_u8(b.as_ptr().add(i + 48));
+
+                let cnt0 = vcntq_u8(veorq_u8(a0, b0));
+                let cnt1 = vcntq_u8(veorq_u8(a1, b1));
+                let cnt2 = vcntq_u8(veorq_u8(a2, b2));
+                let cnt3 = vcntq_u8(veorq_u8(a3, b3));
+
+                acc = vaddq_u8(acc, vaddq_u8(vaddq_u8(cnt0, cnt1), vaddq_u8(cnt2, cnt3)));
+                i += 64;
+            }
+            difference += vaddlvq_u8(acc) as u64;
+            if difference > max_dist_u64 {
+                return u64::MAX;
+            }
+        }
+
+        // Remaining 64-byte chunks
+        let mut acc = zero;
+        while i + 64 <= length {
+            let a0 = vld1q_u8(a.as_ptr().add(i));
+            let b0 = vld1q_u8(b.as_ptr().add(i));
+            let a1 = vld1q_u8(a.as_ptr().add(i + 16));
+            let b1 = vld1q_u8(b.as_ptr().add(i + 16));
+            let a2 = vld1q_u8(a.as_ptr().add(i + 32));
+            let b2 = vld1q_u8(b.as_ptr().add(i + 32));
+            let a3 = vld1q_u8(a.as_ptr().add(i + 48));
+            let b3 = vld1q_u8(b.as_ptr().add(i + 48));
+
+            let cnt0 = vcntq_u8(veorq_u8(a0, b0));
+            let cnt1 = vcntq_u8(veorq_u8(a1, b1));
+            let cnt2 = vcntq_u8(veorq_u8(a2, b2));
+            let cnt3 = vcntq_u8(veorq_u8(a3, b3));
+
+            acc = vaddq_u8(acc, vaddq_u8(vaddq_u8(cnt0, cnt1), vaddq_u8(cnt2, cnt3)));
+            i += 64;
+        }
+        difference += vaddlvq_u8(acc) as u64;
+
+        // 16-byte chunks
+        while i + 16 <= length {
+            let a16 = vld1q_u8(a.as_ptr().add(i));
+            let b16 = vld1q_u8(b.as_ptr().add(i));
+            difference += vaddlvq_u8(vcntq_u8(veorq_u8(a16, b16))) as u64;
+            i += 16;
+        }
+
+        // Scalar tail
+        while i < length {
+            difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+            i += 1;
+        }
+
+        if difference > max_dist_u64 {
+            u64::MAX
+        } else {
+            difference
+        }
+    }
+}
 
 /// NEON vectorized hamming distance for hex strings.
 /// Processes 16 ASCII hex chars per iteration using:
@@ -55,10 +212,8 @@ pub unsafe fn hamming_distance_string_neon(a: &[u8], b: &[u8]) -> Result<u64, &'
             let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
             let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
 
-            // Validate: any lane > 15 means invalid char (0xFF from failed parse)
-            let a_bad = vcgtq_u8(a_nib, fifteen_u);
-            let b_bad = vcgtq_u8(b_nib, fifteen_u);
-            let bad = vorrq_u8(a_bad, b_bad);
+            // Validate: any lane > 15 means invalid char — single cmpgt(or(a,b), 15)
+            let bad = vcgtq_u8(vorrq_u8(a_nib, b_nib), fifteen_u);
             if vmaxvq_u8(bad) != 0 {
                 return Err("hex string contains invalid char");
             }
@@ -84,9 +239,7 @@ pub unsafe fn hamming_distance_string_neon(a: &[u8], b: &[u8]) -> Result<u64, &'
         let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
         let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
 
-        let a_bad = vcgtq_u8(a_nib, fifteen_u);
-        let b_bad = vcgtq_u8(b_nib, fifteen_u);
-        let bad = vorrq_u8(a_bad, b_bad);
+        let bad = vcgtq_u8(vorrq_u8(a_nib, b_nib), fifteen_u);
         if vmaxvq_u8(bad) != 0 {
             return Err("hex string contains invalid char");
         }
@@ -169,32 +322,60 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
     //   XOR the packed bytes, vcntq_u8 popcount.
     while i + 32 <= length {
         // Parse first 16 hex chars → nibbles
-        let a_lo = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
-        let b_lo = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
+        let a_lo = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_lo = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
         // Parse next 16 hex chars → nibbles
-        let a_hi = hex_parse_neon(vld1q_u8(a.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
-        let b_hi = hex_parse_neon(vld1q_u8(b.as_ptr().add(i + 16)), case_mask, ascii_0, seven, nine, ten);
+        let a_hi = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i + 16)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_hi = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i + 16)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
 
-        // Validate all 4 vectors
+        // Validate all 4 vectors — single cmpgt(or(a|b), 15)
         let bad = vorrq_u8(
-            vorrq_u8(vcgtq_u8(a_lo, fifteen_u), vcgtq_u8(b_lo, fifteen_u)),
-            vorrq_u8(vcgtq_u8(a_hi, fifteen_u), vcgtq_u8(b_hi, fifteen_u)),
+            vcgtq_u8(vorrq_u8(a_lo, b_lo), fifteen_u),
+            vcgtq_u8(vorrq_u8(a_hi, b_hi), fifteen_u),
         );
         if vmaxvq_u8(bad) != 0 {
             return Err("hex string contains invalid char");
         }
 
         // XOR nibbles first (before packing — same result, fewer packs)
-        let xor_lo = veorq_u8(a_lo, b_lo);  // 16 nibble XOR results
-        let xor_hi = veorq_u8(a_hi, b_hi);  // 16 nibble XOR results
+        let xor_lo = veorq_u8(a_lo, b_lo); // 16 nibble XOR results
+        let xor_hi = veorq_u8(a_hi, b_hi); // 16 nibble XOR results
 
         // Pack: interleave even/odd nibbles into bytes
         // xor_lo has nibbles [0,1,2,3,...,15], xor_hi has [16,17,...,31]
         // We want bytes where each byte = (nibble[2k] << 4) | nibble[2k+1]
         // Use UZP to deinterleave even/odd lanes, then shift+OR
-        let even_lo = vuzp1q_u8(xor_lo, xor_hi);  // even indices: 0,2,4,...
-        let odd_lo = vuzp2q_u8(xor_lo, xor_hi);   // odd indices: 1,3,5,...
-        // Shift even nibbles left 4 bits via reinterpret + signed shift
+        let even_lo = vuzp1q_u8(xor_lo, xor_hi); // even indices: 0,2,4,...
+        let odd_lo = vuzp2q_u8(xor_lo, xor_hi); // odd indices: 1,3,5,...
+                                                // Shift even nibbles left 4 bits via reinterpret + signed shift
         let packed = vorrq_u8(
             vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
             odd_lo,
@@ -210,15 +391,31 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
     }
 
     // Handle remaining chars with the nibble-based approach
+    // §13: popcnt_tbl loaded once at function entry scope, not per iteration
+    let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
     while i + 16 <= length {
-        let a_nib = hex_parse_neon(vld1q_u8(a.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
-        let b_nib = hex_parse_neon(vld1q_u8(b.as_ptr().add(i)), case_mask, ascii_0, seven, nine, ten);
-        let bad = vorrq_u8(vcgtq_u8(a_nib, fifteen_u), vcgtq_u8(b_nib, fifteen_u));
+        let a_nib = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_nib = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        // §8: single cmpgt(or(a,b), 15)
+        let bad = vcgtq_u8(vorrq_u8(a_nib, b_nib), fifteen_u);
         if vmaxvq_u8(bad) != 0 {
             return Err("hex string contains invalid char");
         }
         let xor = veorq_u8(a_nib, b_nib);
-        let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
         let cnt = vqtbl1q_u8(popcnt_tbl, xor);
         difference += vaddlvq_u8(cnt) as u64;
         i += 16;
@@ -238,6 +435,204 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
     Ok(difference)
 }
 
+/// Like hamming_distance_string_neon_pack, but with early-exit at max_dist.
+/// Returns Ok(u64::MAX) when distance exceeds max_dist (caller treats as "not within").
+#[inline]
+pub unsafe fn hamming_distance_string_neon_pack_with_max(
+    a: &[u8],
+    b: &[u8],
+    max_dist: u64,
+) -> Result<u64, &'static str> {
+    let length = a.len();
+
+    if length < 32 {
+        // Fall back to scalar with early-exit for short inputs
+        return hamming_distance_string_neon_with_max(a, b, max_dist);
+    }
+
+    let fifteen_u = vdupq_n_u8(15);
+    let case_mask = vdupq_n_u8(0xDF);
+    let ascii_0 = vdupq_n_u8(b'0');
+    let seven = vdupq_n_u8(7);
+    let nine = vdupq_n_u8(9);
+    let ten = vdupq_n_u8(10);
+    let four = vdupq_n_s8(4);
+
+    let mut i = 0usize;
+    let mut difference: u64 = 0;
+
+    // Process 32 hex chars at a time with threshold check after each iteration
+    while i + 32 <= length {
+        let a_lo = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_lo = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let a_hi = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i + 16)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_hi = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i + 16)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+
+        // Validate
+        let bad = vorrq_u8(
+            vcgtq_u8(vorrq_u8(a_lo, b_lo), fifteen_u),
+            vcgtq_u8(vorrq_u8(a_hi, b_hi), fifteen_u),
+        );
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+
+        let xor_lo = veorq_u8(a_lo, b_lo);
+        let xor_hi = veorq_u8(a_hi, b_hi);
+
+        let even_lo = vuzp1q_u8(xor_lo, xor_hi);
+        let odd_lo = vuzp2q_u8(xor_lo, xor_hi);
+        let packed = vorrq_u8(
+            vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
+            odd_lo,
+        );
+
+        let cnt = vcntq_u8(packed);
+        difference += vaddlvq_u8(cnt) as u64;
+
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+
+        i += 32;
+    }
+
+    // Handle remaining chars with the nibble-based approach
+    let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
+    while i + 16 <= length {
+        let a_nib = hex_parse_neon(
+            vld1q_u8(a.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let b_nib = hex_parse_neon(
+            vld1q_u8(b.as_ptr().add(i)),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+        );
+        let bad = vcgtq_u8(vorrq_u8(a_nib, b_nib), fifteen_u);
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+        let xor = veorq_u8(a_nib, b_nib);
+        let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+        difference += vaddlvq_u8(cnt) as u64;
+        i += 16;
+    }
+
+    // Scalar tail
+    while i < length {
+        let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+        let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+        if (val1 | val2) & 0xF0 != 0 {
+            return Err("hex string contains invalid char");
+        }
+        difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        i += 1;
+    }
+
+    if difference > max_dist {
+        Ok(u64::MAX)
+    } else {
+        Ok(difference)
+    }
+}
+
+/// Like hamming_distance_string_neon, but with early-exit at max_dist.
+/// Used as fallback for inputs < 32 chars.
+#[inline]
+unsafe fn hamming_distance_string_neon_with_max(
+    a: &[u8],
+    b: &[u8],
+    max_dist: u64,
+) -> Result<u64, &'static str> {
+    let length = a.len();
+
+    let fifteen_u = vdupq_n_u8(15);
+    let case_mask = vdupq_n_u8(0xDF);
+    let ascii_0 = vdupq_n_u8(b'0');
+    let seven = vdupq_n_u8(7);
+    let nine = vdupq_n_u8(9);
+    let ten = vdupq_n_u8(10);
+    let popcnt_tbl = vld1q_u8([0u8, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4].as_ptr());
+
+    let mut i = 0usize;
+    let mut difference: u64 = 0;
+
+    while i + 16 <= length {
+        let a16 = vld1q_u8(a.as_ptr().add(i));
+        let b16 = vld1q_u8(b.as_ptr().add(i));
+
+        let a_nib = hex_parse_neon(a16, case_mask, ascii_0, seven, nine, ten);
+        let b_nib = hex_parse_neon(b16, case_mask, ascii_0, seven, nine, ten);
+
+        let bad = vcgtq_u8(vorrq_u8(a_nib, b_nib), fifteen_u);
+        if vmaxvq_u8(bad) != 0 {
+            return Err("hex string contains invalid char");
+        }
+
+        let xor = veorq_u8(a_nib, b_nib);
+        let cnt = vqtbl1q_u8(popcnt_tbl, xor);
+        difference += vaddlvq_u8(cnt) as u64;
+
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+        i += 16;
+    }
+
+    // Scalar tail
+    while i < length {
+        let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+        let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+        if (val1 | val2) & 0xF0 != 0 {
+            return Err("hex string contains invalid char");
+        }
+        difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        i += 1;
+    }
+
+    if difference > max_dist {
+        Ok(u64::MAX)
+    } else {
+        Ok(difference)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,7 +640,10 @@ mod tests {
     #[test]
     fn neon_string_basic() {
         unsafe {
-            assert_eq!(hamming_distance_string_neon(b"deadbeef", b"00000000").unwrap(), 24);
+            assert_eq!(
+                hamming_distance_string_neon(b"deadbeef", b"00000000").unwrap(),
+                24
+            );
             assert_eq!(hamming_distance_string_neon(b"ffff", b"0000").unwrap(), 16);
             assert_eq!(hamming_distance_string_neon(b"0000", b"0000").unwrap(), 0);
         }
@@ -257,7 +655,10 @@ mod tests {
         unsafe {
             let a = "f".repeat(16);
             let b = "0".repeat(16);
-            assert_eq!(hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(), 64);
+            assert_eq!(
+                hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(),
+                64
+            );
         }
     }
 
@@ -267,15 +668,22 @@ mod tests {
         unsafe {
             let a = "f".repeat(64);
             let b = "0".repeat(64);
-            assert_eq!(hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(), 256);
+            assert_eq!(
+                hamming_distance_string_neon(a.as_bytes(), b.as_bytes()).unwrap(),
+                256
+            );
         }
     }
 
     #[test]
     fn neon_string_invalid() {
         unsafe {
-            assert!(hamming_distance_string_neon(b"zzzzzzzzzzzzzzzz", b"0000000000000000").is_err());
-            assert!(hamming_distance_string_neon(b"@@@@@@@@@@@@@@@@", b"0000000000000000").is_err());
+            assert!(
+                hamming_distance_string_neon(b"zzzzzzzzzzzzzzzz", b"0000000000000000").is_err()
+            );
+            assert!(
+                hamming_distance_string_neon(b"@@@@@@@@@@@@@@@@", b"0000000000000000").is_err()
+            );
         }
     }
 
@@ -284,7 +692,10 @@ mod tests {
         unsafe {
             let a = "f".repeat(32);
             let b = "0".repeat(32);
-            assert_eq!(hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(), 128);
+            assert_eq!(
+                hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(),
+                128
+            );
         }
     }
 
@@ -294,7 +705,10 @@ mod tests {
         unsafe {
             let a = "f".repeat(48);
             let b = "0".repeat(48);
-            assert_eq!(hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(), 192);
+            assert_eq!(
+                hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(),
+                192
+            );
         }
     }
 
@@ -311,6 +725,88 @@ mod tests {
             assert_eq!(
                 hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap(),
                 hamming_distance_string_classic(a.as_bytes(), b.as_bytes()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn neon_pack_with_max_agrees_with_full() {
+        // _with_max(max=u64::MAX) should return same result as full pass
+        let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+        for &len in lengths {
+            let a = "f".repeat(len);
+            let b = "0".repeat(len);
+            unsafe {
+                let full = hamming_distance_string_neon_pack(a.as_bytes(), b.as_bytes()).unwrap();
+                let with_max = hamming_distance_string_neon_pack_with_max(
+                    a.as_bytes(),
+                    b.as_bytes(),
+                    u64::MAX,
+                )
+                .unwrap();
+                assert_eq!(
+                    full, with_max,
+                    "mismatch at len={}: full={} with_max={}",
+                    len, full, with_max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neon_pack_with_max_returns_sentinel() {
+        // Returns u64::MAX when actual distance > max_dist
+        let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+        for &len in lengths {
+            let a = "f".repeat(len);
+            let b = "0".repeat(len);
+            unsafe {
+                let result =
+                    hamming_distance_string_neon_pack_with_max(a.as_bytes(), b.as_bytes(), 1)
+                        .unwrap();
+                assert_eq!(
+                    result,
+                    u64::MAX,
+                    "expected sentinel for len={}, got {}",
+                    len,
+                    result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neon_pack_with_max_returns_actual() {
+        // Returns actual distance when <= max_dist
+        let lengths: &[usize] = &[64, 96, 128, 256, 1024];
+        for &len in lengths {
+            let a = "f".repeat(len);
+            let b = "0".repeat(len);
+            let expected = len as u64 * 4;
+            unsafe {
+                let result = hamming_distance_string_neon_pack_with_max(
+                    a.as_bytes(),
+                    b.as_bytes(),
+                    expected + 100,
+                )
+                .unwrap();
+                assert_eq!(
+                    result, expected,
+                    "mismatch at len={}: expected {} got {}",
+                    len, expected, result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neon_pack_with_max_invalid_chars() {
+        unsafe {
+            let a = "z".repeat(64);
+            let b = "0".repeat(64);
+            assert!(
+                hamming_distance_string_neon_pack_with_max(a.as_bytes(), b.as_bytes(), 100)
+                    .is_err()
             );
         }
     }
