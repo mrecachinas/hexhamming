@@ -284,7 +284,7 @@ jobs:
           EOF
 
       - name: Find existing comment
-        uses: peter-evans/find-comment@v3
+        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e # v3
         if: github.event.pull_request.head.repo.full_name == github.repository
         id: find-comment
         with:
@@ -293,7 +293,7 @@ jobs:
           body-includes: '📊 Benchmark Comparison Results'
 
       - name: Create or update comment
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
         if: github.event.pull_request.head.repo.full_name == github.repository
         with:
           comment-id: ${{ steps.find-comment.outputs.comment-id }}
