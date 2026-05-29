@@ -297,9 +297,9 @@ fn check_bytes_arrays_first_within_dist(
     }
 
     let result = py.allow_threads(move || {
-        // Delegate to the rayon-parallel implementation (serial below
-        // PAR_THRESHOLD_BYTES). Inputs are pre-validated above, so the api
-        // function always returns Ok here.
+        // Delegate to the serial early-exit implementation. `first` is never
+        // parallelized: a parallel scan must evaluate every element to find the
+        // minimum matching index, which is far slower for early/common matches.
         crate::bytes_array_first_within_dist(big_slice, small_slice, max_dist)
             .ok()
             .flatten()
