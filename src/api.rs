@@ -90,6 +90,7 @@ pub fn bytes_array_first_within_dist(
     Ok(serial_first_within_dist(big_array, small_array, max_dist))
 }
 
+#[inline]
 fn serial_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Option<usize> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
@@ -159,6 +160,7 @@ pub fn bytes_array_best_within_dist(
         ))
 }
 
+#[inline]
 fn serial_best_within_dist(
     big_array: &[u8],
     small_array: &[u8],
@@ -217,6 +219,7 @@ pub fn bytes_array_all_within_dist(
     Ok(results)
 }
 
+#[inline]
 fn serial_all_within_dist(
     big_array: &[u8],
     small_array: &[u8],
