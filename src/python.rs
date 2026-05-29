@@ -1,13 +1,13 @@
 use crate::hex::hex_char_to_nibble;
 #[cfg(target_arch = "aarch64")]
 use crate::ALGO_NEON;
+use crate::CURRENT_ALGO;
 use crate::{
     hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
     hamming_distance_string_dispatch_with_max, LOOKUP,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
-use crate::{ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO};
 
 use std::sync::atomic::Ordering;
 
@@ -18,6 +18,18 @@ use pyo3::prelude::*;
 // ---------------------------------------------------------------------------
 // §5 helper: zero-copy slice from a PyBuffer
 // ---------------------------------------------------------------------------
+
+/// Minimum input length (bytes/chars) before it is worth releasing the GIL.
+///
+/// Releasing and reacquiring the GIL (and, for the string API, copying the
+/// input into owned buffers so the closure satisfies `Ungil`) costs on the
+/// order of tens to hundreds of nanoseconds. For small inputs — the common
+/// case for this library — the distance computation itself is only a few ns,
+/// so that overhead dominates. Below this threshold we compute directly on the
+/// borrowed bytes while holding the GIL (sound: the borrow is valid for the
+/// whole synchronous call). Above it, releasing the GIL lets other Python
+/// threads make progress and the copy is amortized.
+const GIL_RELEASE_THRESHOLD: usize = 4096;
 
 /// Extract a contiguous `PyBuffer<u8>` from any buffer-protocol object.
 fn extract_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<u8>> {
@@ -52,9 +64,17 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
     if a.is_empty() {
         return Ok(0);
     }
-    // §5: strings keep .to_vec() since &str is not buffer-protocol
-    let a_owned = a.as_bytes().to_vec();
-    let b_owned = b.as_bytes().to_vec();
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    // Small inputs: compute on the borrowed bytes while holding the GIL — no
+    // allocation, no GIL round-trip. The borrows are valid for the whole call.
+    if a_bytes.len() < GIL_RELEASE_THRESHOLD {
+        return hamming_distance_string_dispatch(a_bytes, b_bytes).map_err(PyValueError::new_err);
+    }
+    // Large inputs: copy into owned buffers (so the closure is `Ungil`) and
+    // release the GIL so other Python threads can run during the computation.
+    let a_owned = a_bytes.to_vec();
+    let b_owned = b_bytes.to_vec();
     py.allow_threads(move || hamming_distance_string_dispatch(&a_owned, &b_owned))
         .map_err(PyValueError::new_err)
 }
@@ -90,7 +110,12 @@ fn hamming_distance_bytes(
         return Ok(0);
     }
 
-    let result = py.allow_threads(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1));
+    // Small inputs: skip the GIL round-trip (already zero-copy via PyBuffer).
+    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        hamming_distance_bytes_dispatch(a_slice, b_slice, -1)
+    } else {
+        py.allow_threads(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1))
+    };
     drop(buf_a);
     drop(buf_b);
     Ok(result)
@@ -272,16 +297,14 @@ fn check_bytes_arrays_first_within_dist(
     }
 
     let result = py.allow_threads(move || {
-        let elem_size = small_slice.len();
-        let num_elements = big_slice.len() / elem_size;
-        for i in 0..num_elements {
-            let chunk = &big_slice[i * elem_size..(i + 1) * elem_size];
-            let d = hamming_distance_bytes_dispatch(chunk, small_slice, max_dist);
-            if d != u64::MAX {
-                return i as i64;
-            }
-        }
-        -1i64
+        // Delegate to the rayon-parallel implementation (serial below
+        // PAR_THRESHOLD_BYTES). Inputs are pre-validated above, so the api
+        // function always returns Ok here.
+        crate::bytes_array_first_within_dist(big_slice, small_slice, max_dist)
+            .ok()
+            .flatten()
+            .map(|i| i as i64)
+            .unwrap_or(-1)
     });
     drop(buf_big);
     drop(buf_small);
@@ -321,24 +344,14 @@ fn check_bytes_arrays_best_within_dist(
     }
 
     let result = py.allow_threads(move || {
-        let elem_size = small_slice.len();
-        let num_elements = big_slice.len() / elem_size;
-        let mut best_dist: Option<u64> = None;
-        let mut best_index: i64 = -1;
-
-        for i in 0..num_elements {
-            let chunk = &big_slice[i * elem_size..(i + 1) * elem_size];
-            let threshold = best_dist.map(|d| (d as i64) - 1).unwrap_or(max_dist);
-            let d = hamming_distance_bytes_dispatch(chunk, small_slice, threshold);
-            if d == u64::MAX {
-                continue;
-            }
-            if best_dist.is_none() || d < best_dist.unwrap() {
-                best_dist = Some(d);
-                best_index = i as i64;
-            }
-        }
-        (best_dist.map(|d| d as i64).unwrap_or(-1), best_index)
+        // Delegate to the rayon-parallel implementation (serial below
+        // PAR_THRESHOLD_BYTES). Tie-break (lowest distance, then lowest index)
+        // matches the previous serial behavior.
+        crate::bytes_array_best_within_dist(big_slice, small_slice, max_dist)
+            .ok()
+            .flatten()
+            .map(|(d, i)| (d as i64, i as i64))
+            .unwrap_or((-1, -1))
     });
     drop(buf_big);
     drop(buf_small);
@@ -377,19 +390,13 @@ fn check_bytes_arrays_all_within_dist(
     }
 
     let results = py.allow_threads(move || {
-        let elem_size = small_slice.len();
-        let num_elements = big_slice.len() / elem_size;
-        // §12: pre-allocate with bounded capacity
-        let mut out: Vec<(u64, u64)> = Vec::with_capacity(std::cmp::min(num_elements, 4096));
-
-        for i in 0..num_elements {
-            let chunk = &big_slice[i * elem_size..(i + 1) * elem_size];
-            let d = hamming_distance_bytes_dispatch(chunk, small_slice, max_dist);
-            if d != u64::MAX {
-                out.push((d, i as u64));
-            }
-        }
-        out
+        // Delegate to the rayon-parallel implementation (serial below
+        // PAR_THRESHOLD_BYTES). Results are returned in ascending index order.
+        crate::bytes_array_all_within_dist(big_slice, small_slice, max_dist)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(d, i)| (d, i as u64))
+            .collect::<Vec<(u64, u64)>>()
     });
     drop(buf_big);
     drop(buf_small);

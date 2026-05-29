@@ -294,6 +294,46 @@ unsafe fn hex_parse_neon(
     let bad_letter = vandq_u8(is_letter, vcltq_u8(adjusted, ten));
     vorrq_u8(result, bad_letter)
 }
+
+/// Parse 32 hex chars at `a`/`b`, XOR their nibbles, and pack the 32 nibble-XOR
+/// results into 16 bytes (each byte holds two XOR'd nibbles).
+///
+/// Returns `(packed, bad)` where `packed` is ready for `vcntq_u8` popcount and
+/// `bad` is a per-lane mask (non-zero lane ⇒ an invalid hex char was seen).
+/// The caller is responsible for accumulating `bad` and validating once.
+///
+/// SAFETY: `a` and `b` must each be valid for 32 readable bytes.
+#[inline(always)]
+unsafe fn pack32_xor_neon(
+    a: *const u8,
+    b: *const u8,
+    case_mask: uint8x16_t,
+    ascii_0: uint8x16_t,
+    seven: uint8x16_t,
+    nine: uint8x16_t,
+    ten: uint8x16_t,
+    fifteen_u: uint8x16_t,
+) -> (uint8x16_t, uint8x16_t) {
+    let a_lo = hex_parse_neon(vld1q_u8(a), case_mask, ascii_0, seven, nine, ten);
+    let b_lo = hex_parse_neon(vld1q_u8(b), case_mask, ascii_0, seven, nine, ten);
+    let a_hi = hex_parse_neon(vld1q_u8(a.add(16)), case_mask, ascii_0, seven, nine, ten);
+    let b_hi = hex_parse_neon(vld1q_u8(b.add(16)), case_mask, ascii_0, seven, nine, ten);
+
+    // Per-lane invalid mask — caller accumulates and checks once.
+    let bad = vorrq_u8(
+        vcgtq_u8(vorrq_u8(a_lo, b_lo), fifteen_u),
+        vcgtq_u8(vorrq_u8(a_hi, b_hi), fifteen_u),
+    );
+
+    // XOR nibbles, then pack even/odd nibbles into bytes.
+    let xor_lo = veorq_u8(a_lo, b_lo);
+    let xor_hi = veorq_u8(a_hi, b_hi);
+    let even = vuzp1q_u8(xor_lo, xor_hi);
+    let odd = vuzp2q_u8(xor_lo, xor_hi);
+    // Constant left-shift by 4 (nibbles are 0-15, so logical shift is correct).
+    let packed = vorrq_u8(vshlq_n_u8(even, 4), odd);
+    (packed, bad)
+}
 /// Alternative: parse 32 hex chars → pack into 16 bytes → use vcntq_u8.
 /// Processes 32 hex chars per iteration (vs 16 in the nibble approach),
 /// and replaces the vqtbl1q popcount lookup with the native vcntq_u8
@@ -312,82 +352,61 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
     let seven = vdupq_n_u8(7);
     let nine = vdupq_n_u8(9);
     let ten = vdupq_n_u8(10);
-    let four = vdupq_n_s8(4);
+    let zero = vdupq_n_u8(0);
 
     let mut i = 0usize;
     let mut difference: u64 = 0;
+    // Accumulate invalid-char masks across the whole SIMD region and check once.
+    let mut bad_acc = zero;
 
-    // Process 32 hex chars at a time:
-    //   Load 32 chars (2×16), parse to nibbles, pack pairs into bytes,
-    //   XOR the packed bytes, vcntq_u8 popcount.
-    while i + 32 <= length {
-        // Parse first 16 hex chars → nibbles
-        let a_lo = hex_parse_neon(
-            vld1q_u8(a.as_ptr().add(i)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let b_lo = hex_parse_neon(
-            vld1q_u8(b.as_ptr().add(i)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        // Parse next 16 hex chars → nibbles
-        let a_hi = hex_parse_neon(
-            vld1q_u8(a.as_ptr().add(i + 16)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let b_hi = hex_parse_neon(
-            vld1q_u8(b.as_ptr().add(i + 16)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
+    // Each 32-char iteration popcounts into a u8 lane (≤8 per packed byte), so
+    // up to 31 iterations are safe before a lane overflows (31*8=248 < 256).
+    // Batch BATCH iterations per horizontal reduction to keep the hot loop free
+    // of cross-lane reductions.
+    const BATCH: usize = 16;
 
-        // Validate all 4 vectors — single cmpgt(or(a|b), 15)
-        let bad = vorrq_u8(
-            vcgtq_u8(vorrq_u8(a_lo, b_lo), fifteen_u),
-            vcgtq_u8(vorrq_u8(a_hi, b_hi), fifteen_u),
-        );
-        if vmaxvq_u8(bad) != 0 {
-            return Err("hex string contains invalid char");
+    while i + 32 * BATCH <= length {
+        let mut acc = zero;
+        for _ in 0..BATCH {
+            let (packed, bad) = pack32_xor_neon(
+                a.as_ptr().add(i),
+                b.as_ptr().add(i),
+                case_mask,
+                ascii_0,
+                seven,
+                nine,
+                ten,
+                fifteen_u,
+            );
+            bad_acc = vorrq_u8(bad_acc, bad);
+            acc = vaddq_u8(acc, vcntq_u8(packed));
+            i += 32;
         }
+        difference += vaddlvq_u8(acc) as u64;
+    }
 
-        // XOR nibbles first (before packing — same result, fewer packs)
-        let xor_lo = veorq_u8(a_lo, b_lo); // 16 nibble XOR results
-        let xor_hi = veorq_u8(a_hi, b_hi); // 16 nibble XOR results
-
-        // Pack: interleave even/odd nibbles into bytes
-        // xor_lo has nibbles [0,1,2,3,...,15], xor_hi has [16,17,...,31]
-        // We want bytes where each byte = (nibble[2k] << 4) | nibble[2k+1]
-        // Use UZP to deinterleave even/odd lanes, then shift+OR
-        let even_lo = vuzp1q_u8(xor_lo, xor_hi); // even indices: 0,2,4,...
-        let odd_lo = vuzp2q_u8(xor_lo, xor_hi); // odd indices: 1,3,5,...
-                                                // Shift even nibbles left 4 bits via reinterpret + signed shift
-        let packed = vorrq_u8(
-            vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
-            odd_lo,
+    // Remaining 32-char chunks (< BATCH of them — still safe in u8 lanes).
+    let mut acc = zero;
+    while i + 32 <= length {
+        let (packed, bad) = pack32_xor_neon(
+            a.as_ptr().add(i),
+            b.as_ptr().add(i),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+            fifteen_u,
         );
-
-        // Now packed has 16 bytes, each containing two XOR'd nibbles
-        // vcntq_u8 counts all set bits per byte — exactly what we want
-        let cnt = vcntq_u8(packed);
-        // Horizontal sum
-        difference += vaddlvq_u8(cnt) as u64;
-
+        bad_acc = vorrq_u8(bad_acc, bad);
+        acc = vaddq_u8(acc, vcntq_u8(packed));
         i += 32;
+    }
+    difference += vaddlvq_u8(acc) as u64;
+
+    // Single validation for the entire 32-char SIMD region.
+    if vmaxvq_u8(bad_acc) != 0 {
+        return Err("hex string contains invalid char");
     }
 
     // Handle remaining chars with the nibble-based approach
@@ -456,73 +475,43 @@ pub unsafe fn hamming_distance_string_neon_pack_with_max(
     let seven = vdupq_n_u8(7);
     let nine = vdupq_n_u8(9);
     let ten = vdupq_n_u8(10);
-    let four = vdupq_n_s8(4);
+    let zero = vdupq_n_u8(0);
 
     let mut i = 0usize;
     let mut difference: u64 = 0;
+    let mut bad_acc = zero;
 
-    // Process 32 hex chars at a time with threshold check after each iteration
+    // Process 32 hex chars at a time, batching cross-lane reductions and the
+    // threshold check. Each packed byte popcount is ≤8, so BATCH iterations are
+    // safe in u8 lanes (BATCH*8 < 256). Early exit is granular to one batch.
+    const BATCH: usize = 16;
     while i + 32 <= length {
-        let a_lo = hex_parse_neon(
-            vld1q_u8(a.as_ptr().add(i)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let b_lo = hex_parse_neon(
-            vld1q_u8(b.as_ptr().add(i)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let a_hi = hex_parse_neon(
-            vld1q_u8(a.as_ptr().add(i + 16)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let b_hi = hex_parse_neon(
-            vld1q_u8(b.as_ptr().add(i + 16)),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-
-        // Validate
-        let bad = vorrq_u8(
-            vcgtq_u8(vorrq_u8(a_lo, b_lo), fifteen_u),
-            vcgtq_u8(vorrq_u8(a_hi, b_hi), fifteen_u),
-        );
-        if vmaxvq_u8(bad) != 0 {
+        let mut acc = zero;
+        let mut n = 0;
+        while n < BATCH && i + 32 <= length {
+            let (packed, bad) = pack32_xor_neon(
+                a.as_ptr().add(i),
+                b.as_ptr().add(i),
+                case_mask,
+                ascii_0,
+                seven,
+                nine,
+                ten,
+                fifteen_u,
+            );
+            bad_acc = vorrq_u8(bad_acc, bad);
+            acc = vaddq_u8(acc, vcntq_u8(packed));
+            i += 32;
+            n += 1;
+        }
+        // Invalid hex chars take precedence over the max_dist sentinel.
+        if vmaxvq_u8(bad_acc) != 0 {
             return Err("hex string contains invalid char");
         }
-
-        let xor_lo = veorq_u8(a_lo, b_lo);
-        let xor_hi = veorq_u8(a_hi, b_hi);
-
-        let even_lo = vuzp1q_u8(xor_lo, xor_hi);
-        let odd_lo = vuzp2q_u8(xor_lo, xor_hi);
-        let packed = vorrq_u8(
-            vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(even_lo), four)),
-            odd_lo,
-        );
-
-        let cnt = vcntq_u8(packed);
-        difference += vaddlvq_u8(cnt) as u64;
-
+        difference += vaddlvq_u8(acc) as u64;
         if difference > max_dist {
             return Ok(u64::MAX);
         }
-
-        i += 32;
     }
 
     // Handle remaining chars with the nibble-based approach
