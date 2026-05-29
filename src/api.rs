@@ -82,19 +82,15 @@ pub fn bytes_array_first_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
-    if big_array.len() < PAR_THRESHOLD_BYTES {
-        return Ok(serial_first_within_dist(big_array, small_array, max_dist));
-    }
-    let elem_size = small_array.len();
-    Ok(big_array
-        .par_chunks_exact(elem_size)
-        .enumerate()
-        .filter_map(|(i, chunk)| {
-            (hamming_distance_bytes_dispatch(chunk, small_array, max_dist) != u64::MAX).then_some(i)
-        })
-        .min())
+    // `first` has early-exit semantics: the serial scan returns as soon as the
+    // first match is found, which is essentially free for early/common matches.
+    // Parallelizing this requires a full non-short-circuiting scan to compute
+    // the minimum matching index, which is dramatically slower for early/mid
+    // matches and cannot beat serial for a match at index 0. Always go serial.
+    Ok(serial_first_within_dist(big_array, small_array, max_dist))
 }
 
+#[inline]
 fn serial_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Option<usize> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
@@ -164,6 +160,7 @@ pub fn bytes_array_best_within_dist(
         ))
 }
 
+#[inline]
 fn serial_best_within_dist(
     big_array: &[u8],
     small_array: &[u8],
@@ -222,6 +219,7 @@ pub fn bytes_array_all_within_dist(
     Ok(results)
 }
 
+#[inline]
 fn serial_all_within_dist(
     big_array: &[u8],
     small_array: &[u8],
@@ -440,7 +438,7 @@ mod tests {
 
     #[test]
     fn first_within_dist_large_batch() {
-        // Above PAR_THRESHOLD_BYTES → parallel path
+        // Large batch → serial early-exit path (first is never parallelized)
         let elem_size = 16;
         let n = 100_000; // 1.6 MB > 64KB
         let needle = vec![0x00u8; elem_size];
@@ -452,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn first_within_dist_parallel_returns_lowest_index() {
+    fn first_within_dist_returns_lowest_index() {
         let elem_size = 16;
         let n = 100_000;
         let needle = vec![0x00u8; elem_size];

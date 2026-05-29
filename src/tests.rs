@@ -42,6 +42,49 @@ fn test_long_strings_32plus() {
 }
 
 #[test]
+fn test_very_long_strings_no_overflow() {
+    // Regression: the AVX-512 string path accumulated per-byte popcounts into
+    // u8 lanes without flushing, overflowing for strings longer than ~4032
+    // chars. Exercise lengths well past that boundary through the default
+    // dispatch (AVX-512/AVX2 on x86, batched NEON on aarch64).
+    for &n in &[4032usize, 4096, 5000, 8192, 10_000] {
+        let a = "f".repeat(n);
+        let b = "0".repeat(n);
+        // Every hex char differs in all 4 bits → 4 * n.
+        assert_eq!(
+            hex_hamming_distance(&a, &b).unwrap(),
+            4 * n as u64,
+            "wrong distance for {n}-char all-f vs all-0"
+        );
+        // Half the distance with a partial pattern, length not a multiple of 64.
+        let c = "f0".repeat(n / 2);
+        let d = "00".repeat(n / 2);
+        assert_eq!(
+            hex_hamming_distance(&c, &d).unwrap(),
+            4 * (n as u64 / 2),
+            "wrong distance for {n}-char f0 vs 00"
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_avx512_string_long_no_overflow() {
+    use crate::set_algorithm;
+    // Only meaningful where AVX-512 BITALG is available; otherwise set_algorithm
+    // returns Err and we skip.
+    if set_algorithm("avx512").is_err() {
+        return;
+    }
+    for &n in &[4096usize, 8192, 12_000] {
+        let a = "f".repeat(n);
+        let b = "0".repeat(n);
+        assert_eq!(hex_hamming_distance(&a, &b).unwrap(), 4 * n as u64);
+    }
+    set_algorithm("native").ok();
+}
+
+#[test]
 fn test_long_mixed_content() {
     // Mixed hex chars to exercise all parse paths across SIMD lanes
     let a = "0123456789abcdef".repeat(8); // 128 chars

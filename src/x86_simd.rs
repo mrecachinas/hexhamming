@@ -22,6 +22,7 @@ pub unsafe fn popcnt128_sse(n: __m128i) -> u64 {
 
 /// SSE4.1 VPSHUFB-based popcount (accumulates into byte lanes)
 /// Returns vector with per-byte popcounts - use _mm_sad_epu8 to sum
+#[inline]
 #[target_feature(enable = "ssse3")]
 unsafe fn popcnt128_shuffle(v: __m128i, mask: __m128i, table: __m128i) -> __m128i {
     let lo = _mm_and_si128(v, mask);
@@ -147,6 +148,7 @@ pub unsafe fn hamming_distance_bytes_sse(a: &[u8], b: &[u8], max_dist: i64) -> u
 }
 
 /// AVX2 VPSHUFB-based popcount - accumulates into byte lanes
+#[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn popcnt256_shuffle(v: __m256i, mask: __m256i, table: __m256i) -> __m256i {
     let lo = _mm256_and_si256(v, mask);
@@ -545,50 +547,57 @@ pub unsafe fn hamming_distance_string_avx512(a: &[u8], b: &[u8]) -> Result<u64, 
     let zero = _mm512_setzero_si512();
 
     let mut i = 0;
+    // Wide (epi64) running total. The per-byte popcount accumulator `acc` is
+    // flushed into this via SAD before any lane can overflow.
     let mut total = _mm512_setzero_si512();
 
-    // Process 64 hex chars at a time
-    // Each nibble XOR produces at most 4 set bits, so per-byte popcount
-    // accumulator maxes at 4 per lane. Safe to accumulate 63 iterations
-    // (63 * 4 = 252 < 255) before horizontal sum. For <256 chars we
-    // never exceed 4 iterations, so no overflow concern.
+    // Each 64-char iteration adds at most 4 set bits per byte lane to `acc`.
+    // A u8 lane overflows after 64 iterations (64*4 = 256), so flush `acc` into
+    // the wide `total` at least every 63 iterations. We use BATCH=32 for a
+    // comfortable margin. (The previous code accumulated into `total` as epi8
+    // with no flush, silently overflowing for strings longer than ~4032 chars.)
+    const BATCH: usize = 32;
     while i + 64 <= length {
-        let a_nib = hex_parse_avx512(
-            _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
-        let b_nib = hex_parse_avx512(
-            _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i),
-            case_mask,
-            ascii_0,
-            seven,
-            nine,
-            ten,
-        );
+        let mut acc = zero;
+        let mut n = 0;
+        while n < BATCH && i + 64 <= length {
+            let a_nib = hex_parse_avx512(
+                _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i),
+                case_mask,
+                ascii_0,
+                seven,
+                nine,
+                ten,
+            );
+            let b_nib = hex_parse_avx512(
+                _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i),
+                case_mask,
+                ascii_0,
+                seven,
+                nine,
+                ten,
+            );
 
-        // §8: consolidated validation — cmpgt(or(a,b), 15) plus negative check
-        let or_nib = _mm512_or_si512(a_nib, b_nib);
-        let invalid =
-            _mm512_cmpgt_epi8_mask(or_nib, fifteen) | _mm512_cmpgt_epi8_mask(zero, or_nib);
-        if invalid != 0 {
-            return Err("hex string contains invalid char");
+            // §8: consolidated validation — cmpgt(or(a,b), 15) plus negative check
+            let or_nib = _mm512_or_si512(a_nib, b_nib);
+            let invalid =
+                _mm512_cmpgt_epi8_mask(or_nib, fifteen) | _mm512_cmpgt_epi8_mask(zero, or_nib);
+            if invalid != 0 {
+                return Err("hex string contains invalid char");
+            }
+
+            // XOR nibbles and VPOPCNTB — counts set bits per byte
+            let xor = _mm512_xor_si512(a_nib, b_nib);
+            acc = _mm512_add_epi8(acc, _mm512_popcnt_epi8(xor));
+
+            i += 64;
+            n += 1;
         }
-
-        // XOR nibbles and VPOPCNTB — counts set bits per byte
-        let xor = _mm512_xor_si512(a_nib, b_nib);
-        let cnt = _mm512_popcnt_epi8(xor);
-        total = _mm512_add_epi8(total, cnt);
-
-        i += 64;
+        // Flush the byte accumulator into the wide total.
+        total = _mm512_add_epi64(total, _mm512_sad_epu8(acc, zero));
     }
 
-    // Horizontal sum via SAD against zero → u64 lanes
-    let sad = _mm512_sad_epu8(total, zero);
-    let mut difference = _mm512_reduce_add_epi64(sad) as u64;
+    let mut difference = _mm512_reduce_add_epi64(total) as u64;
 
     // Handle remaining chars with masked AVX-512 load (no fallthrough)
     let remaining = length - i;
