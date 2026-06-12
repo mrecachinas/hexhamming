@@ -90,7 +90,7 @@ def test_hamming_distance_byte(hex1, hex2, expected):
 @pytest.mark.parametrize(
     "hex1,hex2,exception,msg",
     (
-        ("abc", 3, TypeError, "object cannot be"),
+        ("abc", 3, TypeError, "not an instance of 'str'"),
         ("abc", "a", ValueError, "strings are NOT the same length"),
         ("lol", "foo", ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", ValueError, "hex string contains invalid char"),
@@ -171,7 +171,7 @@ def test_check_bytes_within_dist(bytes1, bytes2, max_dist, expected):
         ("000abcdef", "011abcdef", -1, ValueError, "`max_dist` must be >0"),
         ("000abcdef", "011abcdzz", 3, ValueError, "hex string contains invalid char"),
         ("000abcdef", "011abcdgf", 3, ValueError, "hex string contains invalid char"),
-        ("1f0abcdef", 3, 3, TypeError, "object cannot be"),
+        ("1f0abcdef", 3, 3, TypeError, "not an instance of 'str'"),
         ("011abcdef", "00", 3, ValueError, "strings are NOT the same length"),
     ),
 )
