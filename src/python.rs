@@ -75,7 +75,7 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
     // release the GIL so other Python threads can run during the computation.
     let a_owned = a_bytes.to_vec();
     let b_owned = b_bytes.to_vec();
-    py.allow_threads(move || hamming_distance_string_dispatch(&a_owned, &b_owned))
+    py.detach(move || hamming_distance_string_dispatch(&a_owned, &b_owned))
         .map_err(PyValueError::new_err)
 }
 
@@ -114,7 +114,7 @@ fn hamming_distance_bytes(
     let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
         hamming_distance_bytes_dispatch(a_slice, b_slice, -1)
     } else {
-        py.allow_threads(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1))
+        py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1))
     };
     drop(buf_a);
     drop(buf_b);
@@ -242,8 +242,7 @@ fn check_bytes_within_dist(
         return Err(PyValueError::new_err("array sizes need to be the same"));
     }
 
-    let result =
-        py.allow_threads(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist));
+    let result = py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist));
     drop(buf_a);
     drop(buf_b);
     Ok(result != u64::MAX)
@@ -296,7 +295,7 @@ fn check_bytes_arrays_first_within_dist(
         ));
     }
 
-    let result = py.allow_threads(move || {
+    let result = py.detach(move || {
         // Delegate to the serial early-exit implementation. `first` is never
         // parallelized: a parallel scan must evaluate every element to find the
         // minimum matching index, which is far slower for early/common matches.
@@ -343,7 +342,7 @@ fn check_bytes_arrays_best_within_dist(
         ));
     }
 
-    let result = py.allow_threads(move || {
+    let result = py.detach(move || {
         // Delegate to the rayon-parallel implementation (serial below
         // PAR_THRESHOLD_BYTES). Tie-break (lowest distance, then lowest index)
         // matches the previous serial behavior.
@@ -389,7 +388,7 @@ fn check_bytes_arrays_all_within_dist(
         ));
     }
 
-    let results = py.allow_threads(move || {
+    let results = py.detach(move || {
         // Delegate to the rayon-parallel implementation (serial below
         // PAR_THRESHOLD_BYTES). Results are returned in ascending index order.
         crate::bytes_array_all_within_dist(big_slice, small_slice, max_dist)
