@@ -2,7 +2,7 @@ name: Benchmark PR
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read
