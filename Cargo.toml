@@ -14,7 +14,7 @@ default = ["python"]
 python = ["pyo3"]
 
 [dependencies]
-pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
 rayon = "1.10"
 
 [dev-dependencies]
