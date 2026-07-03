@@ -13,7 +13,10 @@ from hexhamming import (
 )
 
 ############################
-# hamming_distance tests
+# Core Hamming distance APIs
+#
+# These cases cover strings and bytes from empty inputs through large repeated
+# buffers, so both scalar and vectorized chunks must return the same distance.
 ############################
 
 
@@ -44,9 +47,9 @@ from hexhamming import (
 )
 def test_hamming_distance_string(hex1, hex2, expected):
     assert expected == hamming_distance_string(hex1, hex2)
-    assert (
-        len(set_algo("classic")) == 0
-    )  # we have only 2 algorithms for strings currently.
+    # Empty string means the requested backend was accepted; rechecking locks
+    # the explicit classic string path to the same result as the default path.
+    assert len(set_algo("classic")) == 0
     assert expected == hamming_distance_string(hex1, hex2)
 
 
@@ -79,6 +82,8 @@ def test_hamming_distance_byte(hex1, hex2, expected):
     algorithm_list = ["extra", "native", "classic"]
     if machine().lower().startswith("x86"):
         algorithm_list.append("sse41")
+    # Every available backend should agree; unsupported optional SIMD backends
+    # return a message from set_algo and are skipped on that machine.
     for algorithm in algorithm_list:
         result = set_algo(algorithm)
         if len(result) > 0:
@@ -106,6 +111,8 @@ def test_hamming_distance_byte(hex1, hex2, expected):
     ),
 )
 def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
+    # Python callers rely on both exception class and message fragment for
+    # invalid types, length mismatches, and invalid hexadecimal characters.
     with pytest.raises(exception) as excinfo:
         _ = hamming_distance_string(hex1, hex2)
     assert msg in str(excinfo.value)
@@ -120,6 +127,8 @@ def test_hamming_distance_string_errors(hex1, hex2, exception, msg):
     ),
 )
 def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
+    # Threshold checks should match full-distance semantics while allowing the
+    # Rust implementation to stop once it exceeds max_dist.
     algorithm_list = ["extra", "native", "classic"]
     if machine().lower().startswith("x86"):
         algorithm_list.append("sse41")
@@ -140,6 +149,8 @@ def test_check_hexstrings_within_dist(hex1, hex2, max_dist, expected):
     ),
 )
 def test_check_bytes_within_dist(bytes1, bytes2, max_dist, expected):
+    # Byte threshold checks exercise the same backend dispatch as full byte
+    # distances, but return only whether the distance is within max_dist.
     algorithm_list = ["extra", "native", "classic"]
     if machine().lower().startswith("x86"):
         algorithm_list.append("sse41")
@@ -176,9 +187,19 @@ def test_check_bytes_within_dist(bytes1, bytes2, max_dist, expected):
     ),
 )
 def test_check_hexstrings_within_dist_errors(hex1, hex2, max_dist, exception, msg):
+    # Error paths are part of the Python API contract, including max_dist
+    # validation before doing expensive comparisons.
     with pytest.raises(exception) as excinfo:
         _ = check_hexstrings_within_dist(hex1, hex2, max_dist)
     assert msg in str(excinfo.value)
+
+
+############################
+# Array-of-elements byte APIs
+#
+# These APIs compare one element against consecutive fixed-size elements in a
+# larger bytes-like array; size validation prevents ambiguous chunking.
+############################
 
 
 @pytest.mark.parametrize(
@@ -306,6 +327,8 @@ def test_check_bytes_arrays_best_within_dist_invalid_values(
 def test_check_bytes_arrays_first_within_dist_calculation(
     bytes1, bytes2, max_dist, expected
 ):
+    # The "first" API returns the index of the first within-threshold element,
+    # or -1 when no element is close enough.
     algorithm_list = ["extra", "native", "classic"]
     if machine().lower().startswith("x86"):
         algorithm_list.append("sse41")
@@ -357,6 +380,8 @@ def test_check_bytes_arrays_first_within_dist_calculation(
 def test_check_bytes_arrays_all_within_dist_calculation(
     bytes1, bytes2, max_dist, expected
 ):
+    # The "all" API returns every match as (distance, element_index), preserving
+    # scan order for callers that need more than the first or best match.
     algorithm_list = ["extra", "native", "classic"]
     if machine().lower().startswith("x86"):
         algorithm_list.append("sse41")
@@ -366,6 +391,14 @@ def test_check_bytes_arrays_all_within_dist_calculation(
             print(f"Warning: Skipping {algorithm}, reason: {result}")
             continue
         assert expected == check_bytes_arrays_all_within_dist(bytes1, bytes2, max_dist)
+
+
+############################
+# Benchmarks
+#
+# pytest-benchmark cases are kept next to correctness tests because speed is a
+# core feature; inputs include same/different pairs and realistic vector sizes.
+############################
 
 
 @pytest.mark.benchmark(group="hamming_distance_string")
@@ -473,6 +506,8 @@ def test_check_bytes_within_dist_bench(benchmark, bytes1, bytes2, max_dist):
 def test_check_bytes_arrays_first_within_dist_bench(
     benchmark, bytes1, bytes2, max_dist
 ):
+    # Match position varies across start/middle/end to measure early-exit scans
+    # as well as the raw per-element distance calculation.
     benchmark(check_bytes_arrays_first_within_dist, bytes1, bytes2, max_dist)
 
 
@@ -549,7 +584,9 @@ def test_check_bytes_arrays_all_within_dist_bench(benchmark, bytes1, bytes2, max
 
 
 ############################
-# Wave 2a: buffer-protocol tests (bytearray, memoryview)
+# Buffer-protocol inputs
+#
+# Rust bindings should accept common bytes-like Python objects, not only bytes.
 ############################
 
 
@@ -603,6 +640,8 @@ def test_check_bytes_arrays_all_within_dist_bytearray():
 
 
 try:
+    # NumPy is optional for this package, so skip these coverage tests when the
+    # local environment does not provide numpy arrays.
     import numpy as np
 
     HAS_NUMPY = True
@@ -626,7 +665,10 @@ def test_check_bytes_within_dist_numpy():
 
 
 ############################
-# Wave 2a: SIMD path for check_hexstrings_within_dist (len >= 64)
+# SIMD path for check_hexstrings_within_dist
+#
+# Lengths at or above 64 hex characters are intended to exercise vectorized
+# threshold checks, including exact-boundary and over-boundary behavior.
 ############################
 
 
@@ -673,7 +715,10 @@ def test_check_hexstrings_within_dist_simd_invalid_char():
 
 
 ############################
-# Wave 2a: set_algo behavior lock
+# Algorithm selection behavior
+#
+# set_algo is intentionally non-throwing: an empty string means success, while
+# invalid or unavailable backends return a diagnostic string.
 ############################
 
 
@@ -699,6 +744,9 @@ def test_set_algo_roundtrip():
 
 # ---------------------------------------------------------------------------
 # check_hexstrings_within_dist: SIMD early-exit correctness + perf
+#
+# Randomized cases cross-check the threshold API against the exact distance API,
+# while the timing test guards the tight-threshold early-exit path.
 # ---------------------------------------------------------------------------
 
 

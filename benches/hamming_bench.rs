@@ -7,6 +7,7 @@ use hexhamming::{
 #[cfg(target_arch = "aarch64")]
 use hexhamming::hex_hamming_distance_pack;
 
+// Hex sizes are character counts; byte sizes are the corresponding decoded lengths.
 const HEX_SIZES: [usize; 5] = [16, 32, 64, 128, 254];
 const BYTE_SIZES: [usize; 5] = [8, 16, 32, 64, 127];
 
@@ -24,8 +25,10 @@ fn bench_hex_by_algo(c: &mut Criterion) {
         if set_algorithm(algo).is_err() {
             continue; // skip unsupported algos on this CPU
         }
+        // Each group measures one implementation on max-distance hex pairs.
         let mut group = c.benchmark_group(format!("hex_string/{algo}"));
         for size in HEX_SIZES {
+            // "f" vs "0" makes every nibble differ, stressing the bit-count path.
             let a = "f".repeat(size);
             let b = "0".repeat(size);
             group.bench_function(format!("{size} chars"), |bencher| {
@@ -53,8 +56,10 @@ fn bench_bytes_by_algo(c: &mut Criterion) {
         if set_algorithm(algo).is_err() {
             continue;
         }
+        // Raw-byte groups isolate byte Hamming distance from hex parsing costs.
         let mut group = c.benchmark_group(format!("bytes/{algo}"));
         for size in BYTE_SIZES {
+            // 0xFF vs 0x00 makes every bit differ for each byte length.
             let a = vec![0xFFu8; size];
             let b = vec![0x00u8; size];
             group.bench_function(format!("{size} bytes"), |bencher| {
@@ -69,6 +74,7 @@ fn bench_bytes_by_algo(c: &mut Criterion) {
 
 /// Benchmark check_bytes_within_dist
 fn bench_bytes_within_dist(c: &mut Criterion) {
+    // Measures the threshold predicate over byte arrays as distances cross 100 bits.
     let mut group = c.benchmark_group("bytes_within_dist");
     for size in BYTE_SIZES {
         let a = vec![0xFFu8; size];
@@ -82,6 +88,9 @@ fn bench_bytes_within_dist(c: &mut Criterion) {
 
 /// Benchmark array API: first, best, all
 fn bench_array_api(c: &mut Criterion) {
+    // The large buffer is a contiguous catalog of fixed-size byte entries; small is the query.
+    // 0x03 differs from 0x00 by two bits per byte, while copied entries are exact matches.
+    // These groups compare finding the first match, best match, or all matches within distance 1.
     // 512 elements of 16 bytes, match at position 0
     let elem_size = 16usize;
     let num_elements = 512usize;
@@ -185,6 +194,7 @@ fn bench_array_api(c: &mut Criterion) {
 
 #[cfg(target_arch = "aarch64")]
 fn bench_hex_string_pack(c: &mut Criterion) {
+    // AArch64-only group for the packed NEON hex-string path.
     let mut group = c.benchmark_group("hex_string/neon_pack");
     for size in [32, 64, 128, 254] {
         let a = "f".repeat(size);
