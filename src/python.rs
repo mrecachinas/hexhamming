@@ -1,6 +1,4 @@
 use crate::hex::hex_char_to_nibble;
-#[cfg(target_arch = "aarch64")]
-use crate::ALGO_NEON;
 use crate::CURRENT_ALGO;
 use crate::{
     hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
@@ -574,7 +572,9 @@ fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(target_arch = "aarch64")]
     {
-        CURRENT_ALGO.store(ALGO_NEON, Ordering::Relaxed);
+        // LLVM's auto-vectorized native byte loop is faster than the hand-NEON
+        // implementation on Apple Silicon. Hex dispatch still selects NEON.
+        CURRENT_ALGO.store(crate::ALGO_NATIVE, Ordering::Relaxed);
     }
 
     Ok(())

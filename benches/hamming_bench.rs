@@ -47,7 +47,7 @@ fn bench_bytes_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
         &["classic", "sse", "avx2", "avx512"]
     } else if cfg!(target_arch = "aarch64") {
-        &["classic", "neon"]
+        &["classic", "native", "neon"]
     } else {
         &["classic", "native"]
     };
