@@ -11,6 +11,19 @@ use hexhamming::hex_hamming_distance_pack;
 const HEX_SIZES: [usize; 5] = [16, 32, 64, 128, 254];
 const BYTE_SIZES: [usize; 5] = [8, 16, 32, 64, 127];
 
+fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut value = state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94D049BB133111EB);
+            ((value ^ (value >> 31)) >> 56) as u8
+        })
+        .collect()
+}
+
 /// Benchmark hex hamming distance across all available algorithms
 fn bench_hex_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
@@ -192,6 +205,88 @@ fn bench_array_api(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_array_random_and_boundaries(c: &mut Criterion) {
+    let small_16 = pseudo_random_bytes(16, 1);
+    let big_512x16 = pseudo_random_bytes(512 * 16, 2);
+    let mut group = c.benchmark_group("array_api/512x16_random_no_match");
+    group.bench_function("first", |bencher| {
+        bencher.iter(|| {
+            bytes_array_first_within_dist(
+                black_box(&big_512x16),
+                black_box(&small_16),
+                black_box(0),
+            )
+        })
+    });
+    group.bench_function("best", |bencher| {
+        bencher.iter(|| {
+            bytes_array_best_within_dist(black_box(&big_512x16), black_box(&small_16), black_box(0))
+        })
+    });
+    group.bench_function("all", |bencher| {
+        bencher.iter(|| {
+            bytes_array_all_within_dist(black_box(&big_512x16), black_box(&small_16), black_box(0))
+        })
+    });
+    group.finish();
+
+    let small_64 = pseudo_random_bytes(64, 3);
+    let big_16384x64 = pseudo_random_bytes(16_384 * 64, 4);
+    let mut group = c.benchmark_group("array_api/16384x64_random_no_match");
+    group.sample_size(30);
+    group.bench_function("first", |bencher| {
+        bencher.iter(|| {
+            bytes_array_first_within_dist(
+                black_box(&big_16384x64),
+                black_box(&small_64),
+                black_box(0),
+            )
+        })
+    });
+    group.bench_function("best", |bencher| {
+        bencher.iter(|| {
+            bytes_array_best_within_dist(
+                black_box(&big_16384x64),
+                black_box(&small_64),
+                black_box(0),
+            )
+        })
+    });
+    group.bench_function("all", |bencher| {
+        bencher.iter(|| {
+            bytes_array_all_within_dist(
+                black_box(&big_16384x64),
+                black_box(&small_64),
+                black_box(0),
+            )
+        })
+    });
+    group.finish();
+
+    let mut group = c.benchmark_group("array_api/parallel_boundary_64");
+    group.sample_size(30);
+    for num_elements in [4095usize, 4096, 65_536, 81_920, 131_072] {
+        let big = pseudo_random_bytes(num_elements * 64, 10 + num_elements as u64);
+        group.bench_function(format!("{num_elements} elements/all"), |bencher| {
+            bencher.iter(|| {
+                bytes_array_all_within_dist(black_box(&big), black_box(&small_64), black_box(0))
+            })
+        });
+        if num_elements >= 65_536 {
+            group.bench_function(format!("{num_elements} elements/best"), |bencher| {
+                bencher.iter(|| {
+                    bytes_array_best_within_dist(
+                        black_box(&big),
+                        black_box(&small_64),
+                        black_box(0),
+                    )
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 #[cfg(target_arch = "aarch64")]
 fn bench_hex_string_pack(c: &mut Criterion) {
     // AArch64-only group for the packed NEON hex-string path.
@@ -213,6 +308,7 @@ criterion_group!(
     bench_bytes_by_algo,
     bench_bytes_within_dist,
     bench_array_api,
+    bench_array_random_and_boundaries,
     bench_hex_string_pack
 );
 #[cfg(not(target_arch = "aarch64"))]
@@ -221,6 +317,7 @@ criterion_group!(
     bench_hex_by_algo,
     bench_bytes_by_algo,
     bench_bytes_within_dist,
-    bench_array_api
+    bench_array_api,
+    bench_array_random_and_boundaries
 );
 criterion_main!(benches);
