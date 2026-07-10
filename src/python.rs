@@ -32,7 +32,8 @@ use pyo3::types::{PyBytes, PyBytesMethods};
 /// borrowed bytes while holding the GIL (sound: the borrow is valid for the
 /// whole synchronous call). Above it, releasing the GIL lets other Python
 /// threads make progress and the copy is amortized.
-const GIL_RELEASE_THRESHOLD: usize = 4096;
+const STRING_GIL_RELEASE_THRESHOLD: usize = 4096;
+const BYTES_GIL_RELEASE_THRESHOLD: usize = 16 * 1024;
 const ARRAY_GIL_RELEASE_THRESHOLD: usize = 64 * 1024;
 
 #[inline]
@@ -132,7 +133,7 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
     let b_bytes = b.as_bytes();
     // Small inputs: compute on the borrowed bytes while holding the GIL — no
     // allocation, no GIL round-trip. The borrows are valid for the whole call.
-    if a_bytes.len() < GIL_RELEASE_THRESHOLD {
+    if a_bytes.len() < STRING_GIL_RELEASE_THRESHOLD {
         return hamming_distance_string_dispatch(a_bytes, b_bytes).map_err(PyValueError::new_err);
     }
     // Python strings are immutable and remain borrowed for the whole call, so
@@ -166,7 +167,7 @@ fn hamming_distance_bytes(
         if a_slice.is_empty() {
             return Ok(0);
         }
-        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
             return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, -1));
         }
     }
@@ -186,7 +187,7 @@ fn hamming_distance_bytes(
     }
 
     // Small inputs: skip the GIL round-trip (already zero-copy via PyBuffer).
-    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+    let result = if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
         hamming_distance_bytes_dispatch(a_slice, b_slice, -1)
     } else {
         py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1))
@@ -310,7 +311,7 @@ fn check_bytes_within_dist(
         if a_slice.len() != b_slice.len() {
             return Err(PyValueError::new_err("array sizes need to be the same"));
         }
-        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
             return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist) != u64::MAX);
         }
     }
@@ -332,7 +333,7 @@ fn check_bytes_within_dist(
         return Err(PyValueError::new_err("array sizes need to be the same"));
     }
 
-    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+    let result = if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
         hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist)
     } else {
         py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist))
