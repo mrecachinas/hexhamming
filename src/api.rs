@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use std::sync::atomic::Ordering;
 
 /// Minimum total byte size of big_array before we use rayon parallel paths.
-const PAR_THRESHOLD_BYTES: usize = 256 * 1024;
+const PAR_THRESHOLD_BYTES: usize = 5 * 1024 * 1024;
 /// Keep byte-array scans to a small number of coarse jobs. More workers spend
 /// more time scheduling these very small per-record calculations than running
 /// them on current many-core CPUs.
