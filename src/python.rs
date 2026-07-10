@@ -135,11 +135,9 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
     if a_bytes.len() < GIL_RELEASE_THRESHOLD {
         return hamming_distance_string_dispatch(a_bytes, b_bytes).map_err(PyValueError::new_err);
     }
-    // Large inputs: copy into owned buffers (so the closure is `Ungil`) and
-    // release the GIL so other Python threads can run during the computation.
-    let a_owned = a_bytes.to_vec();
-    let b_owned = b_bytes.to_vec();
-    py.detach(move || hamming_distance_string_dispatch(&a_owned, &b_owned))
+    // Python strings are immutable and remain borrowed for the whole call, so
+    // their byte slices can be processed while the interpreter is detached.
+    py.detach(|| hamming_distance_string_dispatch(a_bytes, b_bytes))
         .map_err(PyValueError::new_err)
 }
 
