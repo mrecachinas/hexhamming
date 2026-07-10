@@ -453,6 +453,18 @@ def test_hamming_distance_bytes_bench(benchmark, hex1, hex2):
     benchmark(hamming_distance_bytes, hex1, hex2)
 
 
+@pytest.mark.benchmark(group="hamming_distance_bytes_buffer")
+@pytest.mark.parametrize(
+    "factory",
+    (bytearray, memoryview),
+    ids=("bytearray", "memoryview"),
+)
+def test_hamming_distance_bytes_buffer_bench(benchmark, factory):
+    a = factory(b"\xff" * 64)
+    b = factory(b"\x00" * 64)
+    benchmark(hamming_distance_bytes, a, b)
+
+
 def test_check_hexstrings_within_dist_bench(benchmark):
     benchmark(check_hexstrings_within_dist, "F" * 1000, "0" * 1000, 20)
 
@@ -604,6 +616,12 @@ def test_hamming_distance_bytes_memoryview():
     assert hamming_distance_bytes(a, b) == 16
 
 
+def test_hamming_distance_bytes_noncontiguous_memoryview():
+    a = memoryview(b"\xff\x00\xff\x00")[::2]
+    with pytest.raises(ValueError, match="input must be contiguous"):
+        hamming_distance_bytes(a, a)
+
+
 def test_check_bytes_within_dist_bytearray():
     a = bytearray(b"\xff\x00")
     b = bytearray(b"\xfe\x00")
@@ -655,6 +673,13 @@ def test_hamming_distance_bytes_numpy():
     a = np.array([0xFF, 0x00], dtype=np.uint8)
     b = np.array([0x00, 0xFF], dtype=np.uint8)
     assert hamming_distance_bytes(a, b) == 16
+
+
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_hamming_distance_bytes_numpy_wide_dtype_rejected():
+    a = np.array([0xFF, 0x00], dtype=np.uint32)
+    with pytest.raises(ValueError, match="error occurred while parsing arguments"):
+        hamming_distance_bytes(a, a)
 
 
 @pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
