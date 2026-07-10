@@ -1,6 +1,6 @@
 use crate::{
-    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch, select_bytes_kernel,
-    BytesKernel, ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO,
+    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
+    select_bytes_kernel_for_width, BytesKernel, ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
@@ -112,7 +112,7 @@ pub fn bytes_array_first_within_dist(
         big_array,
         small_array,
         max_dist,
-        select_bytes_kernel(),
+        select_bytes_kernel_for_width(small_array.len()),
     ))
 }
 
@@ -148,7 +148,7 @@ pub fn bytes_array_best_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
-    let kernel = select_bytes_kernel();
+    let kernel = select_bytes_kernel_for_width(small_array.len());
     if big_array.len() < PAR_THRESHOLD_BYTES {
         return Ok(serial_best_within_dist(
             big_array,
@@ -224,7 +224,7 @@ pub fn bytes_array_all_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
-    let kernel = select_bytes_kernel();
+    let kernel = select_bytes_kernel_for_width(small_array.len());
     if big_array.len() < PAR_THRESHOLD_BYTES {
         return Ok(serial_all_within_dist(
             big_array,

@@ -102,6 +102,26 @@ pub(crate) fn hamming_distance_bytes_native(a: &[u8], b: &[u8], max_dist: i64) -
     }
 }
 
+#[inline(always)]
+pub(crate) fn hamming_distance_bytes_native_16(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    debug_assert_eq!(a.len(), 16);
+    debug_assert_eq!(b.len(), 16);
+
+    let difference = unsafe {
+        let a0 = u64::from_ne_bytes(*(a.as_ptr() as *const [u8; 8]));
+        let b0 = u64::from_ne_bytes(*(b.as_ptr() as *const [u8; 8]));
+        let a1 = u64::from_ne_bytes(*(a.as_ptr().add(8) as *const [u8; 8]));
+        let b1 = u64::from_ne_bytes(*(b.as_ptr().add(8) as *const [u8; 8]));
+        popcnt64_native(a0 ^ b0) + popcnt64_native(a1 ^ b1)
+    };
+    let max_dist_u64 = max_dist as u64;
+    if max_dist >= 0 && difference > max_dist_u64 {
+        u64::MAX
+    } else {
+        difference
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +173,19 @@ mod tests {
                 hamming_distance_bytes_native(&a, &b, -1),
                 hamming_distance_bytes_classic(&a, &b, -1),
                 "mismatch at size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_native_16_agrees_with_generic() {
+        let a: Vec<u8> = (0..16).map(|i| i as u8).collect();
+        let b: Vec<u8> = (0..16).map(|i| (i as u8).wrapping_mul(17)).collect();
+        for max_dist in [-1, 0, 1, 63, 64] {
+            assert_eq!(
+                hamming_distance_bytes_native_16(&a, &b, max_dist),
+                hamming_distance_bytes_native(&a, &b, max_dist),
+                "mismatch at max_dist {max_dist}"
             );
         }
     }

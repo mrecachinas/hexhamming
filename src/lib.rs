@@ -89,6 +89,11 @@ pub(crate) static CURRENT_ALGO: AtomicU8 = AtomicU8::new(ALGO_NATIVE);
 
 pub(crate) type BytesKernel = fn(&[u8], &[u8], i64) -> u64;
 
+#[inline]
+fn hamming_distance_bytes_native_16(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    native::hamming_distance_bytes_native_16(a, b, max_dist)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn hamming_distance_bytes_avx512(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
@@ -116,9 +121,7 @@ fn hamming_distance_bytes_neon(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
 /// Resolve the byte-distance backend once for callers that perform many
 /// comparisons with the same algorithm selection.
 #[inline]
-pub(crate) fn select_bytes_kernel() -> BytesKernel {
-    let algo = CURRENT_ALGO.load(Ordering::Relaxed);
-
+fn select_bytes_kernel_for_algo(algo: u8) -> BytesKernel {
     match algo {
         ALGO_CLASSIC => classic::hamming_distance_bytes_classic,
 
@@ -156,6 +159,15 @@ pub(crate) fn select_bytes_kernel() -> BytesKernel {
 
         _ => native::hamming_distance_bytes_native,
     }
+}
+
+#[inline]
+pub(crate) fn select_bytes_kernel_for_width(width: usize) -> BytesKernel {
+    let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+    if algo == ALGO_NATIVE && width == 16 {
+        return hamming_distance_bytes_native_16;
+    }
+    select_bytes_kernel_for_algo(algo)
 }
 
 /// Dispatch to the byte distance implementation selected by `CURRENT_ALGO`.
