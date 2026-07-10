@@ -7,15 +7,19 @@ use crate::{
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
 
+use std::ffi::CStr;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
 
-use pyo3::buffer::PyBuffer;
+use pyo3::buffer::Element;
 use pyo3::exceptions::PyValueError;
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods};
 
 // ---------------------------------------------------------------------------
-// §5 helper: zero-copy slice from a PyBuffer
+// §5 helper: zero-copy slice from the Python buffer protocol
 // ---------------------------------------------------------------------------
 
 /// Minimum input length (bytes/chars) before it is worth releasing the GIL.
@@ -28,7 +32,8 @@ use pyo3::types::{PyBytes, PyBytesMethods};
 /// borrowed bytes while holding the GIL (sound: the borrow is valid for the
 /// whole synchronous call). Above it, releasing the GIL lets other Python
 /// threads make progress and the copy is amortized.
-const GIL_RELEASE_THRESHOLD: usize = 4096;
+const STRING_GIL_RELEASE_THRESHOLD: usize = 4096;
+const BYTES_GIL_RELEASE_THRESHOLD: usize = 16 * 1024;
 const ARRAY_GIL_RELEASE_THRESHOLD: usize = 64 * 1024;
 
 #[inline]
@@ -36,20 +41,75 @@ fn exact_bytes<'a>(obj: &'a Bound<'_, PyAny>) -> Option<&'a [u8]> {
     obj.cast::<PyBytes>().ok().map(PyBytesMethods::as_bytes)
 }
 
-/// Extract a contiguous `PyBuffer<u8>` from any buffer-protocol object.
-fn extract_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<u8>> {
-    let buf: PyBuffer<u8> = PyBuffer::get(obj)
-        .map_err(|_| PyValueError::new_err("error occurred while parsing arguments"))?;
-    if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err("input must be contiguous"));
-    }
-    Ok(buf)
+struct SimpleByteBuffer {
+    raw: ffi::Py_buffer,
+    acquired: bool,
+    _pin: PhantomPinned,
 }
 
-/// SAFETY: caller must ensure `buf` is C-contiguous and remains alive for `'a`.
-#[inline]
-unsafe fn buffer_as_slice<'a>(buf: &'a PyBuffer<u8>) -> &'a [u8] {
-    std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.item_count())
+impl SimpleByteBuffer {
+    fn new() -> Self {
+        Self {
+            raw: ffi::Py_buffer::new(),
+            acquired: false,
+            _pin: PhantomPinned,
+        }
+    }
+
+    fn acquire(mut self: Pin<&mut Self>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        let this = unsafe { self.as_mut().get_unchecked_mut() };
+        let result = unsafe {
+            ffi::PyObject_GetBuffer(
+                obj.as_ptr(),
+                &mut this.raw,
+                ffi::PyBUF_ND | ffi::PyBUF_FORMAT,
+            )
+        };
+        if result != 0 {
+            let _ = PyErr::fetch(obj.py());
+            let message = if unsafe { ffi::PyObject_CheckBuffer(obj.as_ptr()) } != 0 {
+                "input must be contiguous"
+            } else {
+                "error occurred while parsing arguments"
+            };
+            return Err(PyValueError::new_err(message));
+        }
+        this.acquired = true;
+
+        let compatible_format = if this.raw.format.is_null() {
+            false
+        } else {
+            let format = unsafe { CStr::from_ptr(this.raw.format) };
+            <u8 as Element>::is_compatible_format(format)
+        };
+        if this.raw.itemsize != 1 || !compatible_format {
+            return Err(PyValueError::new_err(
+                "error occurred while parsing arguments",
+            ));
+        }
+        if this.raw.len < 0 || (this.raw.buf.is_null() && this.raw.len != 0) {
+            return Err(PyValueError::new_err("invalid buffer view"));
+        }
+        Ok(())
+    }
+
+    /// SAFETY: the pinned guard keeps the exported buffer alive and stationary
+    /// for the returned slice's lifetime.
+    #[inline]
+    unsafe fn as_slice(self: Pin<&Self>) -> &[u8] {
+        let raw = &self.get_ref().raw;
+        std::slice::from_raw_parts(raw.buf as *const u8, raw.len as usize)
+    }
+}
+
+impl Drop for SimpleByteBuffer {
+    fn drop(&mut self) {
+        if self.acquired {
+            let _ = Python::try_attach(|_| unsafe {
+                ffi::PyBuffer_Release(&mut self.raw);
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -73,14 +133,12 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
     let b_bytes = b.as_bytes();
     // Small inputs: compute on the borrowed bytes while holding the GIL — no
     // allocation, no GIL round-trip. The borrows are valid for the whole call.
-    if a_bytes.len() < GIL_RELEASE_THRESHOLD {
+    if a_bytes.len() < STRING_GIL_RELEASE_THRESHOLD {
         return hamming_distance_string_dispatch(a_bytes, b_bytes).map_err(PyValueError::new_err);
     }
-    // Large inputs: copy into owned buffers (so the closure is `Ungil`) and
-    // release the GIL so other Python threads can run during the computation.
-    let a_owned = a_bytes.to_vec();
-    let b_owned = b_bytes.to_vec();
-    py.detach(move || hamming_distance_string_dispatch(&a_owned, &b_owned))
+    // Python strings are immutable and remain borrowed for the whole call, so
+    // their byte slices can be processed while the interpreter is detached.
+    py.detach(|| hamming_distance_string_dispatch(a_bytes, b_bytes))
         .map_err(PyValueError::new_err)
 }
 
@@ -109,16 +167,17 @@ fn hamming_distance_bytes(
         if a_slice.is_empty() {
             return Ok(0);
         }
-        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
             return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, -1));
         }
     }
 
-    let buf_a = extract_buffer(a)?;
-    let buf_b = extract_buffer(b)?;
-    // SAFETY: buffers are C-contiguous; PyBuffer pins the Python object.
-    let a_slice = unsafe { buffer_as_slice(&buf_a) };
-    let b_slice = unsafe { buffer_as_slice(&buf_b) };
+    let mut buf_a = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_b = std::pin::pin!(SimpleByteBuffer::new());
+    buf_a.as_mut().acquire(a)?;
+    buf_b.as_mut().acquire(b)?;
+    let a_slice = unsafe { buf_a.as_ref().as_slice() };
+    let b_slice = unsafe { buf_b.as_ref().as_slice() };
 
     if a_slice.len() != b_slice.len() {
         return Err(PyValueError::new_err("bytes are NOT the same length"));
@@ -128,13 +187,11 @@ fn hamming_distance_bytes(
     }
 
     // Small inputs: skip the GIL round-trip (already zero-copy via PyBuffer).
-    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+    let result = if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
         hamming_distance_bytes_dispatch(a_slice, b_slice, -1)
     } else {
         py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, -1))
     };
-    drop(buf_a);
-    drop(buf_b);
     Ok(result)
 }
 
@@ -254,15 +311,17 @@ fn check_bytes_within_dist(
         if a_slice.len() != b_slice.len() {
             return Err(PyValueError::new_err("array sizes need to be the same"));
         }
-        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
             return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist) != u64::MAX);
         }
     }
 
-    let buf_a = extract_buffer(a)?;
-    let buf_b = extract_buffer(b)?;
-    let a_slice = unsafe { buffer_as_slice(&buf_a) };
-    let b_slice = unsafe { buffer_as_slice(&buf_b) };
+    let mut buf_a = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_b = std::pin::pin!(SimpleByteBuffer::new());
+    buf_a.as_mut().acquire(a)?;
+    buf_b.as_mut().acquire(b)?;
+    let a_slice = unsafe { buf_a.as_ref().as_slice() };
+    let b_slice = unsafe { buf_b.as_ref().as_slice() };
 
     if a_slice.is_empty() || b_slice.is_empty() {
         return Err(PyValueError::new_err("array size must be >0"));
@@ -274,13 +333,11 @@ fn check_bytes_within_dist(
         return Err(PyValueError::new_err("array sizes need to be the same"));
     }
 
-    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+    let result = if a_slice.len() < BYTES_GIL_RELEASE_THRESHOLD {
         hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist)
     } else {
         py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist))
     };
-    drop(buf_a);
-    drop(buf_b);
     Ok(result != u64::MAX)
 }
 
@@ -339,10 +396,12 @@ fn check_bytes_arrays_first_within_dist(
         }
     }
 
-    let buf_big = extract_buffer(array_of_elems)?;
-    let buf_small = extract_buffer(elem_to_compare)?;
-    let big_slice = unsafe { buffer_as_slice(&buf_big) };
-    let small_slice = unsafe { buffer_as_slice(&buf_small) };
+    let mut buf_big = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_small = std::pin::pin!(SimpleByteBuffer::new());
+    buf_big.as_mut().acquire(array_of_elems)?;
+    buf_small.as_mut().acquire(elem_to_compare)?;
+    let big_slice = unsafe { buf_big.as_ref().as_slice() };
+    let small_slice = unsafe { buf_small.as_ref().as_slice() };
 
     if small_slice.is_empty() {
         return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
@@ -370,8 +429,6 @@ fn check_bytes_arrays_first_within_dist(
     } else {
         py.detach(calculate)
     };
-    drop(buf_big);
-    drop(buf_small);
     Ok(result)
 }
 
@@ -415,10 +472,12 @@ fn check_bytes_arrays_best_within_dist(
         }
     }
 
-    let buf_big = extract_buffer(array_of_elems)?;
-    let buf_small = extract_buffer(elem_to_compare)?;
-    let big_slice = unsafe { buffer_as_slice(&buf_big) };
-    let small_slice = unsafe { buffer_as_slice(&buf_small) };
+    let mut buf_big = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_small = std::pin::pin!(SimpleByteBuffer::new());
+    buf_big.as_mut().acquire(array_of_elems)?;
+    buf_small.as_mut().acquire(elem_to_compare)?;
+    let big_slice = unsafe { buf_big.as_ref().as_slice() };
+    let small_slice = unsafe { buf_small.as_ref().as_slice() };
 
     if small_slice.is_empty() {
         return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
@@ -444,8 +503,6 @@ fn check_bytes_arrays_best_within_dist(
     } else {
         py.detach(calculate)
     };
-    drop(buf_big);
-    drop(buf_small);
     Ok(result)
 }
 
@@ -488,10 +545,12 @@ fn check_bytes_arrays_all_within_dist(
         }
     }
 
-    let buf_big = extract_buffer(array_of_elems)?;
-    let buf_small = extract_buffer(elem_to_compare)?;
-    let big_slice = unsafe { buffer_as_slice(&buf_big) };
-    let small_slice = unsafe { buffer_as_slice(&buf_small) };
+    let mut buf_big = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_small = std::pin::pin!(SimpleByteBuffer::new());
+    buf_big.as_mut().acquire(array_of_elems)?;
+    buf_small.as_mut().acquire(elem_to_compare)?;
+    let big_slice = unsafe { buf_big.as_ref().as_slice() };
+    let small_slice = unsafe { buf_small.as_ref().as_slice() };
 
     if small_slice.is_empty() {
         return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
@@ -517,8 +576,6 @@ fn check_bytes_arrays_all_within_dist(
     } else {
         py.detach(calculate)
     };
-    drop(buf_big);
-    drop(buf_small);
     Ok(results)
 }
 

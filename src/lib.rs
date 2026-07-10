@@ -87,6 +87,89 @@ pub(crate) const SSE_THRESHOLD: usize = 64; // Use SSE for medium strings
 /// implementations produce identical results.
 pub(crate) static CURRENT_ALGO: AtomicU8 = AtomicU8::new(ALGO_NATIVE);
 
+pub(crate) type BytesKernel = fn(&[u8], &[u8], i64) -> u64;
+
+#[inline]
+fn hamming_distance_bytes_native_16(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    native::hamming_distance_bytes_native_16(a, b, max_dist)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn hamming_distance_bytes_avx512(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    unsafe { x86_simd::hamming_distance_bytes_avx512(a, b, max_dist) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn hamming_distance_bytes_avx2(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, max_dist) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn hamming_distance_bytes_sse(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    unsafe { x86_simd::hamming_distance_bytes_sse(a, b, max_dist) }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn hamming_distance_bytes_neon(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    unsafe { neon_simd::hamming_distance_bytes_neon(a, b, max_dist) }
+}
+
+/// Resolve the byte-distance backend once for callers that perform many
+/// comparisons with the same algorithm selection.
+#[inline]
+fn select_bytes_kernel_for_algo(algo: u8) -> BytesKernel {
+    match algo {
+        ALGO_CLASSIC => classic::hamming_distance_bytes_classic,
+
+        #[cfg(target_arch = "x86_64")]
+        ALGO_AVX512 => {
+            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
+                hamming_distance_bytes_avx512
+            } else if is_x86_feature_detected!("avx2") {
+                hamming_distance_bytes_avx2
+            } else {
+                native::hamming_distance_bytes_native
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        ALGO_AVX2 => {
+            if is_x86_feature_detected!("avx2") {
+                hamming_distance_bytes_avx2
+            } else {
+                native::hamming_distance_bytes_native
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        ALGO_SSE41 => {
+            if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("popcnt") {
+                hamming_distance_bytes_sse
+            } else {
+                native::hamming_distance_bytes_native
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        ALGO_NEON => hamming_distance_bytes_neon,
+
+        _ => native::hamming_distance_bytes_native,
+    }
+}
+
+#[inline]
+pub(crate) fn select_bytes_kernel_for_width(width: usize) -> BytesKernel {
+    let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+    if algo == ALGO_NATIVE && width == 16 {
+        return hamming_distance_bytes_native_16;
+    }
+    select_bytes_kernel_for_algo(algo)
+}
+
 /// Dispatch to the byte distance implementation selected by `CURRENT_ALGO`.
 ///
 /// Callers validate equal lengths before reaching this layer. `max_dist < 0`
