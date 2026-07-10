@@ -9,7 +9,27 @@ use rayon::prelude::*;
 use std::sync::atomic::Ordering;
 
 /// Minimum total byte size of big_array before we use rayon parallel paths.
-const PAR_THRESHOLD_BYTES: usize = 64 * 1024;
+const PAR_THRESHOLD_BYTES: usize = 256 * 1024;
+/// Keep byte-array scans to a small number of coarse jobs. More workers spend
+/// more time scheduling these very small per-record calculations than running
+/// them on current many-core CPUs.
+const PAR_JOBS: usize = 4;
+
+#[inline]
+fn partition_element_ranges(num_elements: usize) -> [(usize, usize); PAR_JOBS] {
+    let base = num_elements / PAR_JOBS;
+    let remainder = num_elements % PAR_JOBS;
+    let mut ranges = [(0, 0); PAR_JOBS];
+    let mut start = 0;
+
+    for (job, range) in ranges.iter_mut().enumerate() {
+        let end = start + base + usize::from(job < remainder);
+        *range = (start, end);
+        start = end;
+    }
+
+    ranges
+}
 
 /// Calculate the bitwise hamming distance between two equal-length hex strings.
 ///
@@ -121,43 +141,27 @@ pub fn bytes_array_best_within_dist(
         return Ok(serial_best_within_dist(big_array, small_array, max_dist));
     }
     let elem_size = small_array.len();
-    Ok(big_array
-        .par_chunks_exact(elem_size)
-        .enumerate()
-        .fold(
-            || None::<(u64, usize)>,
-            |acc, (i, chunk)| {
-                let threshold = acc
-                    .map(|(d, _)| (d as i64).saturating_sub(1))
-                    .unwrap_or(max_dist);
-                let d = hamming_distance_bytes_dispatch(chunk, small_array, threshold);
-                if d == u64::MAX {
-                    return acc;
-                }
-                match acc {
-                    None => Some((d, i)),
-                    Some((best_d, _)) if d < best_d => Some((d, i)),
-                    _ => acc,
-                }
-            },
-        )
-        .reduce(
-            || None,
-            |a, b| match (a, b) {
-                (None, x) | (x, None) => x,
-                (Some(x), Some(y)) => {
-                    if x.0 < y.0 {
-                        Some(x)
-                    } else if y.0 < x.0 {
-                        Some(y)
-                    } else if x.1 < y.1 {
-                        Some(x)
-                    } else {
-                        Some(y)
-                    }
-                }
-            },
-        ))
+    let num_elements = big_array.len() / elem_size;
+    let ranges = partition_element_ranges(num_elements);
+
+    Ok(ranges
+        .par_iter()
+        .with_max_len(1)
+        .map(|&(start, end)| {
+            let chunk = &big_array[start * elem_size..end * elem_size];
+            serial_best_within_dist(chunk, small_array, max_dist)
+                .map(|(distance, index)| (distance, index + start))
+        })
+        .reduce(|| None, merge_best))
+}
+
+#[inline]
+fn merge_best(a: Option<(u64, usize)>, b: Option<(u64, usize)>) -> Option<(u64, usize)> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(x), Some(y)) if x.0 < y.0 || (x.0 == y.0 && x.1 <= y.1) => Some(x),
+        (Some(_), Some(y)) => Some(y),
+    }
 }
 
 #[inline]
@@ -206,19 +210,27 @@ pub fn bytes_array_all_within_dist(
         return Ok(serial_all_within_dist(big_array, small_array, max_dist));
     }
     let elem_size = small_array.len();
-    let mut results: Vec<(u64, usize)> = big_array
-        .par_chunks_exact(elem_size)
-        .enumerate()
-        .filter_map(|(i, chunk)| {
-            let d = hamming_distance_bytes_dispatch(chunk, small_array, max_dist);
-            if d == u64::MAX {
-                None
-            } else {
-                Some((d, i))
-            }
+    let num_elements = big_array.len() / elem_size;
+    let ranges = partition_element_ranges(num_elements);
+    let per_job: Vec<Vec<(u64, usize)>> = ranges
+        .par_iter()
+        .with_max_len(1)
+        .map(|&(start, end)| {
+            let chunk = &big_array[start * elem_size..end * elem_size];
+            serial_all_within_dist(chunk, small_array, max_dist)
+                .into_iter()
+                .map(|(distance, index)| (distance, index + start))
+                .collect()
         })
         .collect();
-    results.sort_unstable_by_key(|&(_, idx)| idx);
+
+    // The indexed parallel iterator preserves range order, and each serial
+    // result is already ordered, so flattening preserves ascending indices.
+    let result_count = per_job.iter().map(Vec::len).sum();
+    let mut results = Vec::with_capacity(result_count);
+    for job_results in per_job {
+        results.extend(job_results);
+    }
     Ok(results)
 }
 
@@ -427,10 +439,24 @@ mod tests {
     }
 
     #[test]
+    fn parallel_ranges_cover_elements_once() {
+        for num_elements in [1, 3, 4, 5, 7, 8, 9, 100, 100_001] {
+            let ranges = partition_element_ranges(num_elements);
+            assert_eq!(ranges[0].0, 0);
+            assert_eq!(ranges[PAR_JOBS - 1].1, num_elements);
+            for pair in ranges.windows(2) {
+                assert_eq!(pair[0].1, pair[1].0);
+            }
+            let lengths: Vec<usize> = ranges.iter().map(|&(start, end)| end - start).collect();
+            assert!(lengths.iter().max().unwrap() - lengths.iter().min().unwrap() <= 1);
+        }
+    }
+
+    #[test]
     fn first_within_dist_small_batch() {
         // Below PAR_THRESHOLD_BYTES → serial path
         let elem_size = 4;
-        let n = 100; // 400 bytes < 64KB
+        let n = 100; // 400 bytes < parallel threshold
         let needle = vec![0x00u8; elem_size];
         let big = make_batch(elem_size, n, 0xFF, &[50], &needle);
         assert_eq!(
