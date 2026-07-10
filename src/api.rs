@@ -43,6 +43,7 @@ fn partition_element_ranges(num_elements: usize) -> [(usize, usize); PAR_JOBS] {
 /// let dist = hexhamming::hex_hamming_distance("deadbeef", "00000000").unwrap();
 /// assert_eq!(dist, 24);
 /// ```
+#[inline]
 pub fn hex_hamming_distance(a: &str, b: &str) -> Result<u64, &'static str> {
     if a.len() != b.len() {
         return Err("strings are NOT the same length");
