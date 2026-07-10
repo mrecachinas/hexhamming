@@ -276,7 +276,11 @@ fn check_bytes_within_dist(
         return Err(PyValueError::new_err("array sizes need to be the same"));
     }
 
-    let result = py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist));
+    let result = if a_slice.len() < GIL_RELEASE_THRESHOLD {
+        hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist)
+    } else {
+        py.detach(move || hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist))
+    };
     drop(buf_a);
     drop(buf_b);
     Ok(result != u64::MAX)
@@ -354,16 +358,20 @@ fn check_bytes_arrays_first_within_dist(
         ));
     }
 
-    let result = py.detach(move || {
-        // Delegate to the serial early-exit implementation. `first` is never
-        // parallelized: a parallel scan must evaluate every element to find the
-        // minimum matching index, which is far slower for early/common matches.
+    let calculate = || {
+        // `first` is always serial because its early exit beats parallel setup
+        // for early and common matches.
         crate::bytes_array_first_within_dist(big_slice, small_slice, max_dist)
             .ok()
             .flatten()
             .map(|i| i as i64)
             .unwrap_or(-1)
-    });
+    };
+    let result = if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+        calculate()
+    } else {
+        py.detach(calculate)
+    };
     drop(buf_big);
     drop(buf_small);
     Ok(result)
@@ -426,16 +434,18 @@ fn check_bytes_arrays_best_within_dist(
         ));
     }
 
-    let result = py.detach(move || {
-        // Delegate to the rayon-parallel implementation (serial below
-        // PAR_THRESHOLD_BYTES). Tie-break (lowest distance, then lowest index)
-        // matches the previous serial behavior.
+    let calculate = || {
         crate::bytes_array_best_within_dist(big_slice, small_slice, max_dist)
             .ok()
             .flatten()
             .map(|(d, i)| (d as i64, i as i64))
             .unwrap_or((-1, -1))
-    });
+    };
+    let result = if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+        calculate()
+    } else {
+        py.detach(calculate)
+    };
     drop(buf_big);
     drop(buf_small);
     Ok(result)
@@ -497,15 +507,18 @@ fn check_bytes_arrays_all_within_dist(
         ));
     }
 
-    let results = py.detach(move || {
-        // Delegate to the rayon-parallel implementation (serial below
-        // PAR_THRESHOLD_BYTES). Results are returned in ascending index order.
+    let calculate = || {
         crate::bytes_array_all_within_dist(big_slice, small_slice, max_dist)
             .unwrap_or_default()
             .into_iter()
             .map(|(d, i)| (d, i as u64))
             .collect::<Vec<(u64, u64)>>()
-    });
+    };
+    let results = if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+        calculate()
+    } else {
+        py.detach(calculate)
+    };
     drop(buf_big);
     drop(buf_small);
     Ok(results)
