@@ -481,12 +481,18 @@ pub unsafe fn hamming_distance_string_neon_pack_with_max(
     let mut difference: u64 = 0;
     let mut bad_acc = zero;
 
-    // Check the first block immediately. Tight thresholds commonly terminate
-    // here, while inputs that continue use the largest safe reduction batch.
-    if i + 32 <= length {
+    // Check enough initial blocks to cross a tight threshold under typical
+    // two-bits-per-nibble data. Larger thresholds go straight to batching.
+    let eager_blocks = if max_dist < 256 {
+        (max_dist as usize / 64) + 1
+    } else {
+        0
+    };
+    let mut eager = 0;
+    while eager < eager_blocks && i + 32 <= length {
         let (packed, bad) = pack32_xor_neon(
-            a.as_ptr(),
-            b.as_ptr(),
+            a.as_ptr().add(i),
+            b.as_ptr().add(i),
             case_mask,
             ascii_0,
             seven,
@@ -503,6 +509,7 @@ pub unsafe fn hamming_distance_string_neon_pack_with_max(
             return Ok(u64::MAX);
         }
         i += 32;
+        eager += 1;
     }
 
     // Each packed byte popcount is at most 8, so 31 iterations fit safely in
