@@ -481,10 +481,40 @@ pub unsafe fn hamming_distance_string_neon_pack_with_max(
     let mut difference: u64 = 0;
     let mut bad_acc = zero;
 
-    // Process 32 hex chars at a time, batching cross-lane reductions and the
-    // threshold check. Each packed byte popcount is ≤8, so BATCH iterations are
-    // safe in u8 lanes (BATCH*8 < 256). Early exit is granular to one batch.
-    const BATCH: usize = 16;
+    // Check enough initial blocks to cross a tight threshold under typical
+    // two-bits-per-nibble data. Larger thresholds go straight to batching.
+    let eager_blocks = if max_dist < 256 {
+        (max_dist as usize / 64) + 1
+    } else {
+        0
+    };
+    let mut eager = 0;
+    while eager < eager_blocks && i + 32 <= length {
+        let (packed, bad) = pack32_xor_neon(
+            a.as_ptr().add(i),
+            b.as_ptr().add(i),
+            case_mask,
+            ascii_0,
+            seven,
+            nine,
+            ten,
+            fifteen_u,
+        );
+        bad_acc = vorrq_u8(bad_acc, bad);
+        if vmaxvq_u8(bad_acc) != 0 {
+            return Err("hex string contains invalid char");
+        }
+        difference += vaddlvq_u8(vcntq_u8(packed)) as u64;
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+        i += 32;
+        eager += 1;
+    }
+
+    // Each packed byte popcount is at most 8, so 31 iterations fit safely in
+    // u8 lanes (31 * 8 = 248) before one cross-lane reduction.
+    const BATCH: usize = 31;
     while i + 32 <= length {
         let mut acc = zero;
         let mut n = 0;

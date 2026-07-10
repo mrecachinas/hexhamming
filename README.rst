@@ -182,7 +182,9 @@ immutable that is a very slow operation. Use a ``bytearray`` instead, and cast i
 Benchmark
 ---------
 
-All benchmarks on Apple M-series (ARM64) with hexhamming v3.0.0, ``rustc`` 1.85, Python 3.14.
+All benchmarks were run on an Apple M4 Max (ARM64, 16 logical cores, 64 GiB)
+with hexhamming v3.0.0, ``rustc`` 1.96.1, and Python 3.14.6. Values are the
+median of the means from three independent runs.
 
 Raw Rust (no Python overhead)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -190,62 +192,71 @@ Raw Rust (no Python overhead)
 These numbers show the pure computation time using Rust's ``criterion`` benchmarks
 (``cargo bench --no-default-features``), with no Python/PyO3 overhead.
 
-===========================================  ===========
-Name                                           Mean (ns)
-===========================================  ===========
-hex_string (NEON) [16 chars]                        2.0
-hex_string (NEON) [64 chars]                        5.8
-hex_string (NEON) [128 chars]                      11.2
-hex_string (NEON) [254 chars]                      21.2
-bytes (NEON) [8 bytes]                              1.8
-bytes (NEON) [32 bytes]                             2.8
-bytes (NEON) [64 bytes]                             2.6
-bytes (NEON) [127 bytes]                            6.6
-bytes_within_dist [127 bytes]                       1.6
-array first [512×16, at start]                      2.3
-array first [512×16, at end]                      671.4
-array best [512×16]                               925.8
-array all [512×16]                                799.4
-===========================================  ===========
+================================================  ===========
+Name                                              Mean (ns)
+================================================  ===========
+hex_string (NEON) [16 chars]                           2.4
+hex_string (NEON) [64 chars]                           8.3
+hex_string (NEON) [128 chars]                         16.2
+hex_string (NEON) [254 chars]                         30.2
+bytes (native) [8 bytes]                               1.7
+bytes (native) [32 bytes]                              2.4
+bytes (native) [64 bytes]                              3.2
+bytes (native) [127 bytes]                             8.4
+bytes_within_dist [127 bytes]                          2.4
+array first [512×16, at start]                         6.6
+array first [512×16, at end]                       1,397.0
+array best [512×16, exact at start]                     8.3
+array best [512×16, exact at end]                   1,599.2
+array all [512×16]                                  1,610.1
+array best [16384×64, match at mid]                71,121.0
+array all [16384×64, match at mid]                 79,365.0
+array best [100000×128, parallel]                  50,996.0
+array all [100000×128, parallel]                  144,800.0
+================================================  ===========
 
-Larger array workloads cross the parallel (Rayon) threshold; see the Python
-table below for representative end-to-end numbers.
+On AArch64, LLVM's auto-vectorized native byte loop is faster than the
+hand-written NEON byte kernel for these sizes, while hexadecimal strings still
+use the packed NEON implementation. Large array workloads use four balanced
+Rayon jobs to avoid oversubscribing the memory-bound scan.
 
 Python API (via PyO3)
 ~~~~~~~~~~~~~~~~~~~~~
 
-These numbers include Python function call overhead (~45 ns) using ``pytest-benchmark``.
+These numbers include Python wrapper and function-call overhead using
+``pytest-benchmark``.
 
 ======================================================  ===========
 Name                                                      Mean (ns)
 ======================================================  ===========
-hamming_distance_string [3 chars, same]                       84.6
-hamming_distance_string [3 chars, diff]                       83.6
-hamming_distance_string [64 chars, diff]                      91.3
-hamming_distance_string [1024 chars, diff]                   207.4
-hamming_distance_bytes [3 bytes, same]                       127.3
-hamming_distance_bytes [3 bytes, diff]                        96.2
-hamming_distance_bytes [64 bytes, diff]                      169.9
-hamming_distance_bytes [1024 bytes, diff]                    175.2
-check_hexstrings_within_dist [1000 chars]                    221.3
-check_bytes_within_dist [16 bytes]                           146.2
-check_bytes_within_dist [64 bytes]                           107.7
-check_bytes_within_dist [127 bytes]                          100.6
-first_within_dist [512×16, at start]                          98.7
-first_within_dist [512×16, mid]                              570.8
-first_within_dist [512×16, at end]                         1,030.1
-first_within_dist [16384×64, at start]                        99.6
-first_within_dist [16384×64, mid]                         20,838.8
-first_within_dist [16384×64, at end]                      41,489.5
-best_within_dist [512×16, at start]                        1,609.8
-best_within_dist [512×16, at end]                          1,116.4
-best_within_dist [16384×64, mid]                          46,826.1
-all_within_dist [512×16, at start]                         1,342.9
-all_within_dist [512×16, at end]                           1,365.9
-all_within_dist [16384×64, mid]                           48,067.2
+hamming_distance_string [3 chars, same]                       56.3
+hamming_distance_string [3 chars, diff]                      105.8
+hamming_distance_string [64 chars, diff]                      60.0
+hamming_distance_string [1024 chars, diff]                   177.1
+hamming_distance_bytes [3 bytes, same]                        51.7
+hamming_distance_bytes [3 bytes, diff]                        51.8
+hamming_distance_bytes [64 bytes, diff]                       51.9
+hamming_distance_bytes [1024 bytes, diff]                     68.9
+check_hexstrings_within_dist [1000 chars]                     56.4
+check_bytes_within_dist [16 bytes]                            52.5
+check_bytes_within_dist [64 bytes]                            51.8
+check_bytes_within_dist [127 bytes]                           52.8
+first_within_dist [512×16, at start]                          58.5
+first_within_dist [512×16, mid]                              771.4
+first_within_dist [512×16, at end]                         1,475.1
+first_within_dist [16384×64, at start]                       160.3
+first_within_dist [16384×64, mid]                         23,031.5
+first_within_dist [16384×64, at end]                      45,801.2
+best_within_dist [512×16, at start]                           75.3
+best_within_dist [512×16, at end]                          1,703.5
+best_within_dist [16384×64, mid]                          93,212.8
+all_within_dist [512×16, at start]                         1,735.5
+all_within_dist [512×16, at end]                           1,747.3
+all_within_dist [16384×64, mid]                           93,056.3
 ======================================================  ===========
 
-For small inputs, Python call overhead dominates (~45 ns). For large inputs
+For small inputs, Python call and wrapper overhead dominates (roughly 40–55 ns
+on this machine). For large inputs
 (1024+ chars, 16384-element arrays), computation dominates and Python overhead
 is negligible. Array APIs transparently parallelize with Rayon once the input
 exceeds ~64 KiB; the ``first`` variant additionally short-circuits on the first
