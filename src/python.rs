@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyBytesMethods};
 
 // ---------------------------------------------------------------------------
 // §5 helper: zero-copy slice from a PyBuffer
@@ -30,6 +31,12 @@ use pyo3::prelude::*;
 /// whole synchronous call). Above it, releasing the GIL lets other Python
 /// threads make progress and the copy is amortized.
 const GIL_RELEASE_THRESHOLD: usize = 4096;
+const ARRAY_GIL_RELEASE_THRESHOLD: usize = 64 * 1024;
+
+#[inline]
+fn exact_bytes<'a>(obj: &'a Bound<'_, PyAny>) -> Option<&'a [u8]> {
+    obj.cast::<PyBytes>().ok().map(PyBytesMethods::as_bytes)
+}
 
 /// Extract a contiguous `PyBuffer<u8>` from any buffer-protocol object.
 fn extract_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<u8>> {
@@ -97,6 +104,18 @@ fn hamming_distance_bytes(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<u64> {
+    if let (Some(a_slice), Some(b_slice)) = (exact_bytes(a), exact_bytes(b)) {
+        if a_slice.len() != b_slice.len() {
+            return Err(PyValueError::new_err("bytes are NOT the same length"));
+        }
+        if a_slice.is_empty() {
+            return Ok(0);
+        }
+        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+            return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, -1));
+        }
+    }
+
     let buf_a = extract_buffer(a)?;
     let buf_b = extract_buffer(b)?;
     // SAFETY: buffers are C-contiguous; PyBuffer pins the Python object.
@@ -227,6 +246,21 @@ fn check_bytes_within_dist(
     b: &Bound<'_, PyAny>,
     max_dist: i64,
 ) -> PyResult<bool> {
+    if let (Some(a_slice), Some(b_slice)) = (exact_bytes(a), exact_bytes(b)) {
+        if a_slice.is_empty() || b_slice.is_empty() {
+            return Err(PyValueError::new_err("array size must be >0"));
+        }
+        if max_dist < 0 {
+            return Err(PyValueError::new_err("`max_dist` must be >=0"));
+        }
+        if a_slice.len() != b_slice.len() {
+            return Err(PyValueError::new_err("array sizes need to be the same"));
+        }
+        if a_slice.len() < GIL_RELEASE_THRESHOLD {
+            return Ok(hamming_distance_bytes_dispatch(a_slice, b_slice, max_dist) != u64::MAX);
+        }
+    }
+
     let buf_a = extract_buffer(a)?;
     let buf_b = extract_buffer(b)?;
     let a_slice = unsafe { buffer_as_slice(&buf_a) };
@@ -278,6 +312,31 @@ fn check_bytes_arrays_first_within_dist(
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: i64,
 ) -> PyResult<i64> {
+    if let (Some(big_slice), Some(small_slice)) =
+        (exact_bytes(array_of_elems), exact_bytes(elem_to_compare))
+    {
+        if small_slice.is_empty() {
+            return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
+        }
+        if max_dist < 0 {
+            return Err(PyValueError::new_err("`max_dist` must be >=0"));
+        }
+        if big_slice.len() % small_slice.len() != 0 {
+            return Err(PyValueError::new_err(
+                "`array_of_elems` size must be multiplier of `elem_to_compare`",
+            ));
+        }
+        if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+            return Ok(
+                crate::bytes_array_first_within_dist(big_slice, small_slice, max_dist)
+                    .ok()
+                    .flatten()
+                    .map(|i| i as i64)
+                    .unwrap_or(-1),
+            );
+        }
+    }
+
     let buf_big = extract_buffer(array_of_elems)?;
     let buf_small = extract_buffer(elem_to_compare)?;
     let big_slice = unsafe { buffer_as_slice(&buf_big) };
@@ -325,6 +384,31 @@ fn check_bytes_arrays_best_within_dist(
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: i64,
 ) -> PyResult<(i64, i64)> {
+    if let (Some(big_slice), Some(small_slice)) =
+        (exact_bytes(array_of_elems), exact_bytes(elem_to_compare))
+    {
+        if small_slice.is_empty() {
+            return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
+        }
+        if max_dist < 0 {
+            return Err(PyValueError::new_err("`max_dist` must be >=0"));
+        }
+        if big_slice.len() % small_slice.len() != 0 {
+            return Err(PyValueError::new_err(
+                "`array_of_elems` size must be multiplier of `elem_to_compare`",
+            ));
+        }
+        if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+            return Ok(
+                crate::bytes_array_best_within_dist(big_slice, small_slice, max_dist)
+                    .ok()
+                    .flatten()
+                    .map(|(distance, index)| (distance as i64, index as i64))
+                    .unwrap_or((-1, -1)),
+            );
+        }
+    }
+
     let buf_big = extract_buffer(array_of_elems)?;
     let buf_small = extract_buffer(elem_to_compare)?;
     let big_slice = unsafe { buffer_as_slice(&buf_big) };
@@ -371,6 +455,31 @@ fn check_bytes_arrays_all_within_dist(
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: i64,
 ) -> PyResult<Vec<(u64, u64)>> {
+    if let (Some(big_slice), Some(small_slice)) =
+        (exact_bytes(array_of_elems), exact_bytes(elem_to_compare))
+    {
+        if small_slice.is_empty() {
+            return Err(PyValueError::new_err("`elem_to_compare` size must be >0"));
+        }
+        if max_dist < 0 {
+            return Err(PyValueError::new_err("`max_dist` must be >=0"));
+        }
+        if big_slice.len() % small_slice.len() != 0 {
+            return Err(PyValueError::new_err(
+                "`array_of_elems` size must be multiplier of `elem_to_compare`",
+            ));
+        }
+        if big_slice.len() < ARRAY_GIL_RELEASE_THRESHOLD {
+            return Ok(
+                crate::bytes_array_all_within_dist(big_slice, small_slice, max_dist)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(distance, index)| (distance, index as u64))
+                    .collect(),
+            );
+        }
+    }
+
     let buf_big = extract_buffer(array_of_elems)?;
     let buf_small = extract_buffer(elem_to_compare)?;
     let big_slice = unsafe { buffer_as_slice(&buf_big) };
