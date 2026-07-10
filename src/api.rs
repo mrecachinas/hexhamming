@@ -1,6 +1,6 @@
 use crate::{
-    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch, ALGO_CLASSIC, ALGO_NATIVE,
-    CURRENT_ALGO,
+    hamming_distance_bytes_dispatch, hamming_distance_string_dispatch, select_bytes_kernel,
+    BytesKernel, ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
@@ -108,16 +108,26 @@ pub fn bytes_array_first_within_dist(
     // Parallelizing this requires a full non-short-circuiting scan to compute
     // the minimum matching index, which is dramatically slower for early/mid
     // matches and cannot beat serial for a match at index 0. Always go serial.
-    Ok(serial_first_within_dist(big_array, small_array, max_dist))
+    Ok(serial_first_within_dist(
+        big_array,
+        small_array,
+        max_dist,
+        select_bytes_kernel(),
+    ))
 }
 
 #[inline]
-fn serial_first_within_dist(big_array: &[u8], small_array: &[u8], max_dist: i64) -> Option<usize> {
+fn serial_first_within_dist(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+    kernel: BytesKernel,
+) -> Option<usize> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
     for i in 0..num_elements {
         let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
-        if hamming_distance_bytes_dispatch(chunk, small_array, max_dist) != u64::MAX {
+        if kernel(chunk, small_array, max_dist) != u64::MAX {
             return Some(i);
         }
     }
@@ -138,8 +148,14 @@ pub fn bytes_array_best_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    let kernel = select_bytes_kernel();
     if big_array.len() < PAR_THRESHOLD_BYTES {
-        return Ok(serial_best_within_dist(big_array, small_array, max_dist));
+        return Ok(serial_best_within_dist(
+            big_array,
+            small_array,
+            max_dist,
+            kernel,
+        ));
     }
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
@@ -150,7 +166,7 @@ pub fn bytes_array_best_within_dist(
         .with_max_len(1)
         .map(|&(start, end)| {
             let chunk = &big_array[start * elem_size..end * elem_size];
-            serial_best_within_dist(chunk, small_array, max_dist)
+            serial_best_within_dist(chunk, small_array, max_dist, kernel)
                 .map(|(distance, index)| (distance, index + start))
         })
         .reduce(|| None, merge_best))
@@ -170,6 +186,7 @@ fn serial_best_within_dist(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
+    kernel: BytesKernel,
 ) -> Option<(u64, usize)> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
@@ -179,7 +196,7 @@ fn serial_best_within_dist(
         let threshold = best
             .map(|(d, _)| (d as i64).saturating_sub(1))
             .unwrap_or(max_dist);
-        let d = hamming_distance_bytes_dispatch(chunk, small_array, threshold);
+        let d = kernel(chunk, small_array, threshold);
         if d == u64::MAX {
             continue;
         }
@@ -207,8 +224,14 @@ pub fn bytes_array_all_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    let kernel = select_bytes_kernel();
     if big_array.len() < PAR_THRESHOLD_BYTES {
-        return Ok(serial_all_within_dist(big_array, small_array, max_dist));
+        return Ok(serial_all_within_dist(
+            big_array,
+            small_array,
+            max_dist,
+            kernel,
+        ));
     }
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
@@ -218,7 +241,7 @@ pub fn bytes_array_all_within_dist(
         .with_max_len(1)
         .map(|&(start, end)| {
             let chunk = &big_array[start * elem_size..end * elem_size];
-            serial_all_within_dist(chunk, small_array, max_dist)
+            serial_all_within_dist(chunk, small_array, max_dist, kernel)
                 .into_iter()
                 .map(|(distance, index)| (distance, index + start))
                 .collect()
@@ -240,13 +263,14 @@ fn serial_all_within_dist(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
+    kernel: BytesKernel,
 ) -> Vec<(u64, usize)> {
     let elem_size = small_array.len();
     let num_elements = big_array.len() / elem_size;
     let mut results = Vec::new();
     for i in 0..num_elements {
         let chunk = &big_array[i * elem_size..(i + 1) * elem_size];
-        let d = hamming_distance_bytes_dispatch(chunk, small_array, max_dist);
+        let d = kernel(chunk, small_array, max_dist);
         if d != u64::MAX {
             results.push((d, i));
         }
