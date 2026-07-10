@@ -180,6 +180,9 @@ fn serial_best_within_dist(
         }
         if best.is_none() || d < best.unwrap().0 {
             best = Some((d, i));
+            if d == 0 {
+                return best;
+            }
         }
     }
     best
