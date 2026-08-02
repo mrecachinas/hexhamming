@@ -478,3 +478,113 @@ fn test_string_dispatch_with_max_mixed_pattern() {
         }
     }
 }
+
+fn array_oracle(
+    big: &[u8],
+    small: &[u8],
+    max_dist: i64,
+) -> (Option<usize>, Option<(u64, usize)>, Vec<(u64, usize)>) {
+    let width = small.len();
+    let mut first = None;
+    let mut best = None;
+    let mut all = Vec::new();
+    for (index, record) in big.chunks_exact(width).enumerate() {
+        let distance = expected_byte_distance(record, small);
+        if max_dist >= 0 && distance > max_dist as u64 {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(index);
+        }
+        if best
+            .map(|(best_distance, best_index)| {
+                distance < best_distance || (distance == best_distance && index < best_index)
+            })
+            .unwrap_or(true)
+        {
+            best = Some((distance, index));
+        }
+        all.push((distance, index));
+    }
+    (first, best, all)
+}
+
+#[test]
+fn test_fixed_width_array_scanners_match_randomized_oracle() {
+    for algorithm in ["native", "classic"] {
+        crate::set_algorithm(algorithm).unwrap();
+        for &width in &[1usize, 3, 7, 15, 16, 17, 31, 32, 33] {
+            let count = 37;
+            let mut state = 0xA5A5_1234_5678_9ABCu64 ^ width as u64;
+            let mut next_byte = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            };
+            let small: Vec<u8> = (0..width).map(|_| next_byte()).collect();
+            let mut big: Vec<u8> = (0..count * width).map(|_| next_byte()).collect();
+
+            // Duplicate exact matches test lowest-index tie behavior and all
+            // result ordering. A four-bit near match supplies d-1/d/d+1
+            // threshold cases without relying on random distances.
+            for &index in &[2usize, 19, 36] {
+                big[index * width..(index + 1) * width].copy_from_slice(&small);
+            }
+            let near_index = 12;
+            big[near_index * width..(near_index + 1) * width].copy_from_slice(&small);
+            big[near_index * width] ^= 0b1111;
+
+            for max_dist in [0, 3, 4, 5, 8, -1] {
+                let expected = array_oracle(&big, &small, max_dist);
+                assert_eq!(
+                    bytes_array_first_within_dist(&big, &small, max_dist).unwrap(),
+                    expected.0,
+                    "first mismatch algorithm={algorithm} width={width} max_dist={max_dist}"
+                );
+                assert_eq!(
+                    bytes_array_best_within_dist(&big, &small, max_dist).unwrap(),
+                    expected.1,
+                    "best mismatch algorithm={algorithm} width={width} max_dist={max_dist}"
+                );
+                assert_eq!(
+                    bytes_array_all_within_dist(&big, &small, max_dist).unwrap(),
+                    expected.2,
+                    "all mismatch algorithm={algorithm} width={width} max_dist={max_dist}"
+                );
+            }
+        }
+    }
+    crate::set_algorithm("native").unwrap();
+}
+
+#[test]
+fn test_parallel_fixed_width_scanners_preserve_boundaries_and_order() {
+    crate::set_algorithm("native").unwrap();
+    let width = 16;
+    let count = (16 * 1024 * 1024) / width + 7;
+    let small = vec![0u8; width];
+    let mut big = vec![0xFFu8; count * width];
+    let quarter = count / 4;
+    let exact_indices = [quarter - 1, quarter, quarter + 1, count - 1];
+    for &index in &exact_indices {
+        big[index * width..(index + 1) * width].copy_from_slice(&small);
+    }
+
+    assert_eq!(
+        bytes_array_first_within_dist(&big, &small, 0).unwrap(),
+        Some(exact_indices[0])
+    );
+    assert_eq!(
+        bytes_array_best_within_dist(&big, &small, 0).unwrap(),
+        Some((0, exact_indices[0]))
+    );
+    let all = bytes_array_all_within_dist(&big, &small, 0).unwrap();
+    assert_eq!(
+        all,
+        exact_indices
+            .into_iter()
+            .map(|index| (0, index))
+            .collect::<Vec<_>>()
+    );
+}

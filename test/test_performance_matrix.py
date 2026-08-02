@@ -1,8 +1,13 @@
 import random
 
 import pytest
-
-from hexhamming import hamming_distance_bytes, hamming_distance_string
+from hexhamming import (
+    check_bytes_arrays_all_within_dist,
+    check_bytes_arrays_best_within_dist,
+    check_bytes_arrays_first_within_dist,
+    hamming_distance_bytes,
+    hamming_distance_string,
+)
 
 
 def random_bytes(size):
@@ -56,3 +61,62 @@ def test_hamming_distance_bytes_gil_boundary_bench(benchmark, size):
     a = random_bytes(size)
     b = random_bytes(size + 1)[:size]
     benchmark(hamming_distance_bytes, a, b)
+
+
+def fixed_width_array_case(width, scenario):
+    count = 1024
+    rng = random.Random(0x51_0000 + width)
+    needle = bytes(rng.randrange(256) for _ in range(width))
+    big = bytearray(rng.randrange(256) for _ in range(count * width))
+    if scenario == "random_no_match":
+        max_dist = 0
+        index = None
+    elif scenario == "exact_early":
+        max_dist, index = 0, 0
+    elif scenario == "exact_mid":
+        max_dist, index = 0, count // 2
+    elif scenario == "exact_late":
+        max_dist, index = 0, count - 1
+    elif scenario == "threshold_d_minus_1":
+        max_dist, index = 3, count // 2
+    elif scenario == "threshold_d":
+        max_dist, index = 4, count // 2
+    elif scenario == "threshold_d_plus_1":
+        max_dist, index = 5, count // 2
+    else:
+        raise AssertionError(f"unknown scenario: {scenario}")
+
+    if index is not None:
+        start = index * width
+        big[start : start + width] = needle
+        if scenario.startswith("threshold_"):
+            big[start] ^= 0x0F
+    return bytes(big), needle, max_dist
+
+
+@pytest.mark.benchmark(group="array_scan_matrix")
+@pytest.mark.parametrize("width", (16, 32))
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "random_no_match",
+        "exact_early",
+        "exact_mid",
+        "exact_late",
+        "threshold_d_minus_1",
+        "threshold_d",
+        "threshold_d_plus_1",
+    ),
+)
+@pytest.mark.parametrize(
+    "operation",
+    (
+        check_bytes_arrays_first_within_dist,
+        check_bytes_arrays_best_within_dist,
+        check_bytes_arrays_all_within_dist,
+    ),
+    ids=("first", "best", "all"),
+)
+def test_fixed_width_array_scan_matrix_bench(benchmark, width, scenario, operation):
+    big, needle, max_dist = fixed_width_array_case(width, scenario)
+    benchmark(operation, big, needle, max_dist)

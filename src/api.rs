@@ -1,3 +1,5 @@
+#[cfg(target_arch = "aarch64")]
+use crate::ALGO_NEON;
 use crate::{
     hamming_distance_bytes_dispatch, hamming_distance_string_dispatch,
     select_bytes_kernel_for_width, BytesKernel, ALGO_CLASSIC, ALGO_NATIVE, CURRENT_ALGO,
@@ -10,10 +12,54 @@ use std::sync::atomic::Ordering;
 
 /// Minimum total byte size of big_array before we use rayon parallel paths.
 const PAR_THRESHOLD_BYTES: usize = 5 * 1024 * 1024;
+/// The fixed-width NEON scanners make serial scans substantially cheaper, so
+/// use a larger crossover before paying Rayon scheduling and partition costs.
+const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
 /// Keep byte-array scans to a small number of coarse jobs. More workers spend
 /// more time scheduling these very small per-record calculations than running
 /// them on current many-core CPUs.
 const PAR_JOBS: usize = 4;
+
+type ArrayFirstScanner = fn(&[u8], &[u8], i64) -> Option<usize>;
+type ArrayBestScanner = fn(&[u8], &[u8], i64) -> Option<(u64, usize)>;
+type ArrayAllScanner = fn(&[u8], &[u8], i64) -> Vec<(u64, usize)>;
+
+#[derive(Clone, Copy)]
+struct ArrayScanner {
+    first: ArrayFirstScanner,
+    best: ArrayBestScanner,
+    all: ArrayAllScanner,
+}
+
+#[inline]
+fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanner> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+        if algo != ALGO_NATIVE && algo != ALGO_NEON {
+            return None;
+        }
+        return match width {
+            16 => Some(ArrayScanner {
+                first: crate::neon_simd::array_first_neon_16,
+                best: crate::neon_simd::array_best_neon_16,
+                all: crate::neon_simd::array_all_neon_16,
+            }),
+            32 => Some(ArrayScanner {
+                first: crate::neon_simd::array_first_neon_32,
+                best: crate::neon_simd::array_best_neon_32,
+                all: crate::neon_simd::array_all_neon_32,
+            }),
+            _ => None,
+        };
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = width;
+        None
+    }
+}
 
 #[inline]
 fn partition_element_ranges(num_elements: usize) -> [(usize, usize); PAR_JOBS] {
@@ -103,6 +149,9 @@ pub fn bytes_array_first_within_dist(
     if big_array.len() % small_array.len() != 0 {
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
+    if let Some(scanner) = select_array_scanner_for_width(small_array.len()) {
+        return Ok((scanner.first)(big_array, small_array, max_dist));
+    }
     // `first` has early-exit semantics: the serial scan returns as soon as the
     // first match is found, which is essentially free for early/common matches.
     // Parallelizing this requires a full non-short-circuiting scan to compute
@@ -149,7 +198,16 @@ pub fn bytes_array_best_within_dist(
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
     let kernel = select_bytes_kernel_for_width(small_array.len());
-    if big_array.len() < PAR_THRESHOLD_BYTES {
+    let scanner = select_array_scanner_for_width(small_array.len());
+    let parallel_threshold = if scanner.is_some() {
+        FIXED_WIDTH_PAR_THRESHOLD_BYTES
+    } else {
+        PAR_THRESHOLD_BYTES
+    };
+    if big_array.len() < parallel_threshold {
+        if let Some(scanner) = scanner {
+            return Ok((scanner.best)(big_array, small_array, max_dist));
+        }
         return Ok(serial_best_within_dist(
             big_array,
             small_array,
@@ -166,8 +224,11 @@ pub fn bytes_array_best_within_dist(
         .with_max_len(1)
         .map(|&(start, end)| {
             let chunk = &big_array[start * elem_size..end * elem_size];
-            serial_best_within_dist(chunk, small_array, max_dist, kernel)
-                .map(|(distance, index)| (distance, index + start))
+            let best = match scanner {
+                Some(scanner) => (scanner.best)(chunk, small_array, max_dist),
+                None => serial_best_within_dist(chunk, small_array, max_dist, kernel),
+            };
+            best.map(|(distance, index)| (distance, index + start))
         })
         .reduce(|| None, merge_best))
 }
@@ -225,7 +286,16 @@ pub fn bytes_array_all_within_dist(
         return Err("array_of_elems size must be multiplier of elem_to_compare");
     }
     let kernel = select_bytes_kernel_for_width(small_array.len());
-    if big_array.len() < PAR_THRESHOLD_BYTES {
+    let scanner = select_array_scanner_for_width(small_array.len());
+    let parallel_threshold = if scanner.is_some() {
+        FIXED_WIDTH_PAR_THRESHOLD_BYTES
+    } else {
+        PAR_THRESHOLD_BYTES
+    };
+    if big_array.len() < parallel_threshold {
+        if let Some(scanner) = scanner {
+            return Ok((scanner.all)(big_array, small_array, max_dist));
+        }
         return Ok(serial_all_within_dist(
             big_array,
             small_array,
@@ -241,7 +311,11 @@ pub fn bytes_array_all_within_dist(
         .with_max_len(1)
         .map(|&(start, end)| {
             let chunk = &big_array[start * elem_size..end * elem_size];
-            serial_all_within_dist(chunk, small_array, max_dist, kernel)
+            let matches = match scanner {
+                Some(scanner) => (scanner.all)(chunk, small_array, max_dist),
+                None => serial_all_within_dist(chunk, small_array, max_dist, kernel),
+            };
+            matches
                 .into_iter()
                 .map(|(distance, index)| (distance, index + start))
                 .collect()

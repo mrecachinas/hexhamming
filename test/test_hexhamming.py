@@ -1,14 +1,16 @@
 #!/usr/bin/env python
+import random
 from platform import machine
+
 import pytest
 from hexhamming import (
-    check_hexstrings_within_dist,
-    check_bytes_within_dist,
-    hamming_distance_string,
-    hamming_distance_bytes,
-    check_bytes_arrays_first_within_dist,
-    check_bytes_arrays_best_within_dist,
     check_bytes_arrays_all_within_dist,
+    check_bytes_arrays_best_within_dist,
+    check_bytes_arrays_first_within_dist,
+    check_bytes_within_dist,
+    check_hexstrings_within_dist,
+    hamming_distance_bytes,
+    hamming_distance_string,
     set_algo,
 )
 
@@ -391,6 +393,38 @@ def test_check_bytes_arrays_all_within_dist_calculation(
             print(f"Warning: Skipping {algorithm}, reason: {result}")
             continue
         assert expected == check_bytes_arrays_all_within_dist(bytes1, bytes2, max_dist)
+
+
+@pytest.mark.parametrize("width", (16, 32))
+def test_fixed_width_array_apis_randomized_oracle(width):
+    rng = random.Random(0x51_0000 + width)
+    count = 37
+    needle = bytes(rng.randrange(256) for _ in range(width))
+    records = [bytes(rng.randrange(256) for _ in range(width)) for _ in range(count)]
+    for index in (2, 19, 36):
+        records[index] = needle
+    near = bytearray(needle)
+    near[0] ^= 0x0F
+    records[12] = bytes(near)
+    array = b"".join(records)
+
+    for max_dist in (0, 3, 4, 5, 8):
+        distances = [
+            (int.from_bytes(record, "big") ^ int.from_bytes(needle, "big")).bit_count()
+            for record in records
+        ]
+        expected = [
+            (distance, index)
+            for index, distance in enumerate(distances)
+            if distance <= max_dist
+        ]
+        assert check_bytes_arrays_first_within_dist(array, needle, max_dist) == (
+            expected[0][1] if expected else -1
+        )
+        assert check_bytes_arrays_best_within_dist(array, needle, max_dist) == (
+            min(expected, key=lambda item: (item[0], item[1])) if expected else (-1, -1)
+        )
+        assert check_bytes_arrays_all_within_dist(array, needle, max_dist) == expected
 
 
 ############################
