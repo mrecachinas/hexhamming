@@ -82,30 +82,14 @@ pub fn bytes_pairwise_distances_into(
         return Ok(0);
     }
     let kernel = select_bytes_kernel_for_width(element_size);
-    // Write via unaligned raw stores because caller-supplied memoryviews may
-    // not be aligned to 8 bytes.
-    let dst_ptr = out.as_mut_ptr();
-    pairwise_distances_loop(a, b, element_size, kernel, |i, d| unsafe {
-        std::ptr::write_unaligned(dst_ptr.add(i * 8) as *mut u64, d.to_le());
-    });
-    Ok(count)
-}
-
-#[inline(always)]
-fn pairwise_distances_loop<F: FnMut(usize, u64)>(
-    a: &[u8],
-    b: &[u8],
-    element_size: usize,
-    kernel: BytesKernel,
-    mut on_distance: F,
-) {
-    for (i, (a_chunk, b_chunk)) in a
+    for ((a_chunk, b_chunk), out_chunk) in a
         .chunks_exact(element_size)
         .zip(b.chunks_exact(element_size))
-        .enumerate()
+        .zip(out.chunks_exact_mut(8))
     {
-        on_distance(i, kernel(a_chunk, b_chunk, -1));
+        out_chunk.copy_from_slice(&kernel(a_chunk, b_chunk, -1).to_le_bytes());
     }
+    Ok(count)
 }
 
 /// Validate common catalog + queries inputs and return `(query_count,
