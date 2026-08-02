@@ -44,7 +44,7 @@ pub fn bytes_pairwise_distances(
     }
     let kernel = select_bytes_kernel_for_width(element_size);
     let mut out: Vec<u64> = Vec::with_capacity(count);
-    pairwise_distances_loop(a, b, element_size, count, kernel, |i, d| {
+    pairwise_distances_loop(a, b, element_size, kernel, |i, d| {
         // SAFETY: capacity == count preallocated, i < count.
         unsafe {
             let dst = out.as_mut_ptr().add(i);
@@ -93,7 +93,7 @@ pub fn bytes_pairwise_distances_into(
     // Write via unaligned raw stores because caller-supplied memoryviews may
     // not be aligned to 8 bytes.
     let dst_ptr = out.as_mut_ptr();
-    pairwise_distances_loop(a, b, element_size, count, kernel, |i, d| unsafe {
+    pairwise_distances_loop(a, b, element_size, kernel, |i, d| unsafe {
         std::ptr::write_unaligned(dst_ptr.add(i * 8) as *mut u64, d.to_le());
     });
     Ok(count)
@@ -104,23 +104,14 @@ fn pairwise_distances_loop<F: FnMut(usize, u64)>(
     a: &[u8],
     b: &[u8],
     element_size: usize,
-    count: usize,
     kernel: BytesKernel,
     mut on_distance: F,
 ) {
-    // Hoisted-pointer loop: bypasses per-iteration slice bounds checks. Length
-    // invariants were validated by callers before entering the loop.
-    let a_ptr = a.as_ptr();
-    let b_ptr = b.as_ptr();
-    for i in 0..count {
-        // SAFETY: i < count and count*element_size == a.len() == b.len(),
-        // so the constructed slices are always within the original buffers.
-        let (a_chunk, b_chunk) = unsafe {
-            (
-                std::slice::from_raw_parts(a_ptr.add(i * element_size), element_size),
-                std::slice::from_raw_parts(b_ptr.add(i * element_size), element_size),
-            )
-        };
+    for (i, (a_chunk, b_chunk)) in a
+        .chunks_exact(element_size)
+        .zip(b.chunks_exact(element_size))
+        .enumerate()
+    {
         on_distance(i, kernel(a_chunk, b_chunk, -1));
     }
 }
