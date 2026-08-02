@@ -11,34 +11,35 @@ use rayon::prelude::*;
 use std::sync::atomic::Ordering;
 
 /// Minimum total byte size of big_array before we use rayon parallel paths.
-const PAR_THRESHOLD_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const PAR_THRESHOLD_BYTES: usize = 5 * 1024 * 1024;
 /// The fixed-width NEON scanners make serial scans substantially cheaper, so
 /// use a larger crossover before paying Rayon scheduling and partition costs.
-const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
 /// Keep byte-array scans to a small number of coarse jobs. More workers spend
 /// more time scheduling these very small per-record calculations than running
 /// them on current many-core CPUs.
 const PAR_JOBS: usize = 4;
 
-type ArrayFirstScanner = fn(&[u8], &[u8], i64) -> Option<usize>;
-type ArrayBestScanner = fn(&[u8], &[u8], i64) -> Option<(u64, usize)>;
-type ArrayAllScanner = fn(&[u8], &[u8], i64) -> Vec<(u64, usize)>;
+pub(crate) type ArrayFirstScanner = fn(&[u8], &[u8], i64) -> Option<usize>;
+pub(crate) type ArrayBestScanner = fn(&[u8], &[u8], i64) -> Option<(u64, usize)>;
+pub(crate) type ArrayAllScanner = fn(&[u8], &[u8], i64) -> Vec<(u64, usize)>;
 
 #[derive(Clone, Copy)]
-struct ArrayScanner {
-    first: ArrayFirstScanner,
-    best: ArrayBestScanner,
-    all: ArrayAllScanner,
+pub(crate) struct ArrayScanner {
+    pub(crate) first: ArrayFirstScanner,
+    pub(crate) best: ArrayBestScanner,
+    pub(crate) all: ArrayAllScanner,
 }
 
 #[inline]
-fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanner> {
+pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanner> {
     #[cfg(target_arch = "aarch64")]
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
         if algo != ALGO_NATIVE && algo != ALGO_NEON {
             return None;
         }
+
         return match width {
             16 => Some(ArrayScanner {
                 first: crate::neon_simd::array_first_neon_16,
@@ -59,6 +60,16 @@ fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanner> {
         let _ = width;
         None
     }
+}
+
+#[inline]
+pub(crate) fn should_parallel_array_scan(byte_len: usize, width: usize) -> bool {
+    let threshold = if select_array_scanner_for_width(width).is_some() {
+        FIXED_WIDTH_PAR_THRESHOLD_BYTES
+    } else {
+        PAR_THRESHOLD_BYTES
+    };
+    byte_len >= threshold
 }
 
 #[inline]
@@ -166,7 +177,7 @@ pub fn bytes_array_first_within_dist(
 }
 
 #[inline]
-fn serial_first_within_dist(
+pub(crate) fn serial_first_within_dist(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
@@ -243,7 +254,7 @@ fn merge_best(a: Option<(u64, usize)>, b: Option<(u64, usize)>) -> Option<(u64, 
 }
 
 #[inline]
-fn serial_best_within_dist(
+pub(crate) fn serial_best_within_dist(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
@@ -333,7 +344,7 @@ pub fn bytes_array_all_within_dist(
 }
 
 #[inline]
-fn serial_all_within_dist(
+pub(crate) fn serial_all_within_dist(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
