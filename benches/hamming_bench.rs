@@ -9,7 +9,7 @@ use hexhamming::hex_hamming_distance_pack;
 
 // Hex sizes are character counts; byte sizes are the corresponding decoded lengths.
 const HEX_SIZES: [usize; 5] = [16, 32, 64, 128, 254];
-const BYTE_SIZES: [usize; 5] = [8, 16, 32, 64, 127];
+const BYTE_SIZES: [usize; 8] = [8, 16, 32, 64, 127, 128, 256, 512];
 
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
@@ -287,6 +287,124 @@ fn bench_array_random_and_boundaries(c: &mut Criterion) {
     group.finish();
 }
 
+fn fixed_width_array_case(width: usize, scenario: &str) -> (Vec<u8>, Vec<u8>, i64) {
+    const NUM_ELEMENTS: usize = 1024;
+    let small = pseudo_random_bytes(width, 0x51 + width as u64);
+    let mut big = pseudo_random_bytes(NUM_ELEMENTS * width, 0xA1 + width as u64);
+    let (match_index, max_dist) = match scenario {
+        "random_no_match" => (None, 0),
+        "exact_early" => (Some(0), 0),
+        "exact_mid" => (Some(NUM_ELEMENTS / 2), 0),
+        "exact_late" => (Some(NUM_ELEMENTS - 1), 0),
+        "threshold_d_minus_1" => (Some(NUM_ELEMENTS / 2), 3),
+        "threshold_d" => (Some(NUM_ELEMENTS / 2), 4),
+        "threshold_d_plus_1" => (Some(NUM_ELEMENTS / 2), 5),
+        _ => unreachable!("unknown fixed-width benchmark scenario"),
+    };
+    if let Some(index) = match_index {
+        let record = &mut big[index * width..(index + 1) * width];
+        record.copy_from_slice(&small);
+        if scenario.starts_with("threshold_") {
+            record[0] ^= 0x0F;
+        }
+    }
+    (big, small, max_dist)
+}
+
+fn bench_fixed_width_array_matrix(c: &mut Criterion) {
+    let scenarios = [
+        "random_no_match",
+        "exact_early",
+        "exact_mid",
+        "exact_late",
+        "threshold_d_minus_1",
+        "threshold_d",
+        "threshold_d_plus_1",
+    ];
+
+    for width in [16usize, 32] {
+        let mut group = c.benchmark_group(format!("array_matrix/{width}byte_records"));
+        for scenario in scenarios {
+            let (big, small, max_dist) = fixed_width_array_case(width, scenario);
+            group.bench_function(format!("{scenario}/first"), |bencher| {
+                bencher.iter(|| {
+                    bytes_array_first_within_dist(
+                        black_box(&big),
+                        black_box(&small),
+                        black_box(max_dist),
+                    )
+                })
+            });
+            group.bench_function(format!("{scenario}/best"), |bencher| {
+                bencher.iter(|| {
+                    bytes_array_best_within_dist(
+                        black_box(&big),
+                        black_box(&small),
+                        black_box(max_dist),
+                    )
+                })
+            });
+            group.bench_function(format!("{scenario}/all"), |bencher| {
+                bencher.iter(|| {
+                    bytes_array_all_within_dist(
+                        black_box(&big),
+                        black_box(&small),
+                        black_box(max_dist),
+                    )
+                })
+            });
+        }
+        group.finish();
+    }
+}
+
+fn bench_fixed_width_parallel_crossover(c: &mut Criterion) {
+    const PAR_THRESHOLDS: [(&str, usize); 2] = [
+        ("legacy", 5 * 1024 * 1024),
+        ("fixed_width", 16 * 1024 * 1024),
+    ];
+    let mut group = c.benchmark_group("array_matrix/parallel_crossover");
+    group.sample_size(10);
+    for width in [16usize, 32] {
+        let small = pseudo_random_bytes(width, 0xC1 + width as u64);
+        for &(threshold_name, threshold_bytes) in &PAR_THRESHOLDS {
+            let threshold_elements = threshold_bytes / width;
+            for count in [
+                threshold_elements - 1,
+                threshold_elements,
+                threshold_elements + 1,
+            ] {
+                let big = pseudo_random_bytes(count * width, 0xD1 + count as u64);
+                group.bench_function(
+                    format!("{threshold_name}/{width}byte/{count}elements/best"),
+                    |bencher| {
+                        bencher.iter(|| {
+                            bytes_array_best_within_dist(
+                                black_box(&big),
+                                black_box(&small),
+                                black_box(0),
+                            )
+                        })
+                    },
+                );
+                group.bench_function(
+                    format!("{threshold_name}/{width}byte/{count}elements/all"),
+                    |bencher| {
+                        bencher.iter(|| {
+                            bytes_array_all_within_dist(
+                                black_box(&big),
+                                black_box(&small),
+                                black_box(0),
+                            )
+                        })
+                    },
+                );
+            }
+        }
+    }
+    group.finish();
+}
+
 #[cfg(target_arch = "aarch64")]
 fn bench_hex_string_pack(c: &mut Criterion) {
     // AArch64-only group for the packed NEON hex-string path.
@@ -309,6 +427,8 @@ criterion_group!(
     bench_bytes_within_dist,
     bench_array_api,
     bench_array_random_and_boundaries,
+    bench_fixed_width_array_matrix,
+    bench_fixed_width_parallel_crossover,
     bench_hex_string_pack
 );
 #[cfg(not(target_arch = "aarch64"))]
@@ -318,6 +438,8 @@ criterion_group!(
     bench_bytes_by_algo,
     bench_bytes_within_dist,
     bench_array_api,
-    bench_array_random_and_boundaries
+    bench_array_random_and_boundaries,
+    bench_fixed_width_array_matrix,
+    bench_fixed_width_parallel_crossover
 );
 criterion_main!(benches);

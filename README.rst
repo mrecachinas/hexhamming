@@ -183,7 +183,7 @@ Benchmark
 ---------
 
 All benchmarks were run on an Apple M4 Max (ARM64, 16 logical cores, 64 GiB)
-with hexhamming v3.0.0, ``rustc`` 1.96.1, and Python 3.14.6. Values are the
+with hexhamming v3.0.0, ``rustc`` 1.97.1, and Python 3.14.6. Values are the
 median of the means from three independent runs.
 
 Raw Rust (no Python overhead)
@@ -191,6 +191,24 @@ Raw Rust (no Python overhead)
 
 These numbers show the pure computation time using Rust's ``criterion`` benchmarks
 (``cargo bench --no-default-features``), with no Python/PyO3 overhead.
+
+Issue #51 fixed-width array matrix (1024 records; median of three run medians)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The matrix uses deterministic random no-match and exact-midpoint cases for
+16-byte and 32-byte records. Each run uses
+``--warm-up-time 1 --measurement-time 1 --sample-size 20``.
+
+====================================  ===========  ===========
+Case                                 16-byte (ns) 32-byte (ns)
+====================================  ===========  ===========
+random no-match / first                    397.5        797.8
+random no-match / best                     407.0        992.2
+random no-match / all                      523.7       1047.7
+exact midpoint / first                    216.3        422.7
+exact midpoint / best                     216.6        414.0
+exact midpoint / all                      540.9        822.0
+====================================  ===========  ===========
 
 ================================================  ===========
 Name                                              Mean (ns)
@@ -257,6 +275,23 @@ all_within_dist [512×16, at end]                             537.5
 all_within_dist [16384×64, mid]                           30,725.4
 ======================================================  ===========
 
+Issue #51 Python buffer matrix (1024 records; median of three run medians)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These end-to-end timings use ``timeit.repeat`` with 10,000 calls per sample,
+including the PyO3 wrapper and buffer-protocol path.
+
+====================================  ===========  ===========
+Case                                 16-byte (ns) 32-byte (ns)
+====================================  ===========  ===========
+random no-match / first                    443.4        836.8
+random no-match / best                     487.0        850.2
+random no-match / all                      564.8        851.7
+exact midpoint / first                    272.2        468.1
+exact midpoint / best                     295.0        483.8
+exact midpoint / all                      638.8        921.0
+====================================  ===========  ===========
+
 For random inputs, the direct APIs also avoid the temporary big integers used
 by an equivalent standard-library implementation:
 
@@ -276,6 +311,7 @@ dominates (roughly 30–40 ns on this machine). For large inputs
 (1024+ chars, 16384-element arrays), computation dominates and Python overhead
 is negligible. Byte operations release the GIL at 16 KiB, while immutable
 strings use a zero-copy detached path from 4 KiB. Array wrappers release the GIL
-at 64 KiB and parallelize with Rayon at 5 MiB; the ``first`` variant additionally
-short-circuits on the first hit, so a match near the start is much faster than
-one near the end.
+at 64 KiB; generic scans parallelize with Rayon at 5 MiB, while the optimized
+16/32-byte NEON scanners use a measured 16 MiB crossover. The ``first`` variant
+additionally short-circuits on the first hit, so a match near the start is much
+faster than one near the end.

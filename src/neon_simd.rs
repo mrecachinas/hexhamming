@@ -163,6 +163,209 @@ pub(crate) unsafe fn hamming_distance_bytes_neon(a: &[u8], b: &[u8], max_dist: i
     }
 }
 
+#[inline(always)]
+unsafe fn hamming_distance_neon_fixed<const WIDTH: usize>(
+    record: *const u8,
+    query: *const u8,
+) -> u64 {
+    let query0 = vld1q_u8(query);
+    let record0 = vld1q_u8(record);
+    let mut distance = vaddlvq_u8(vcntq_u8(veorq_u8(record0, query0))) as u64;
+
+    if WIDTH == 32 {
+        let query1 = vld1q_u8(query.add(16));
+        let record1 = vld1q_u8(record.add(16));
+        distance += vaddlvq_u8(vcntq_u8(veorq_u8(record1, query1))) as u64;
+    }
+    distance
+}
+
+#[inline(always)]
+unsafe fn hamming_distance_neon_fixed4<const WIDTH: usize>(
+    records: *const u8,
+    query: *const u8,
+) -> [u64; 4] {
+    [
+        hamming_distance_neon_fixed::<WIDTH>(records, query),
+        hamming_distance_neon_fixed::<WIDTH>(records.add(WIDTH), query),
+        hamming_distance_neon_fixed::<WIDTH>(records.add(WIDTH * 2), query),
+        hamming_distance_neon_fixed::<WIDTH>(records.add(WIDTH * 3), query),
+    ]
+}
+
+#[inline(always)]
+fn within_fixed_threshold(distance: u64, max_dist: i64) -> bool {
+    max_dist < 0 || distance <= max_dist as u64
+}
+
+unsafe fn array_first_neon<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    let count = big_array.len() / WIDTH;
+    let mut index = 0;
+    while index + 4 <= count {
+        let distances = hamming_distance_neon_fixed4::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        for (lane, &distance) in distances.iter().enumerate() {
+            if within_fixed_threshold(distance, max_dist) {
+                return Some(index + lane);
+            }
+        }
+        index += 4;
+    }
+    while index < count {
+        let distance = hamming_distance_neon_fixed::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        if within_fixed_threshold(distance, max_dist) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+unsafe fn array_best_neon<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    let count = big_array.len() / WIDTH;
+    let mut best: Option<(u64, usize)> = None;
+    let mut index = 0;
+
+    while index + 4 <= count {
+        let distances = hamming_distance_neon_fixed4::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        for (lane, &distance) in distances.iter().enumerate() {
+            let candidate_index = index + lane;
+            let eligible = match best {
+                Some((best_distance, _)) => distance < best_distance,
+                None => within_fixed_threshold(distance, max_dist),
+            };
+            if !eligible {
+                continue;
+            }
+            if best.is_none() || distance < best.unwrap().0 {
+                best = Some((distance, candidate_index));
+                if distance == 0 {
+                    return best;
+                }
+            }
+        }
+        index += 4;
+    }
+
+    while index < count {
+        let distance = hamming_distance_neon_fixed::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        let eligible = match best {
+            Some((best_distance, _)) => distance < best_distance,
+            None => within_fixed_threshold(distance, max_dist),
+        };
+        if eligible {
+            best = Some((distance, index));
+            if distance == 0 {
+                return best;
+            }
+        }
+        index += 1;
+    }
+    best
+}
+
+unsafe fn array_all_neon<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    let count = big_array.len() / WIDTH;
+    let mut matches = Vec::new();
+    let mut index = 0;
+
+    while index + 4 <= count {
+        let distances = hamming_distance_neon_fixed4::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        for (lane, &distance) in distances.iter().enumerate() {
+            if within_fixed_threshold(distance, max_dist) {
+                matches.push((distance, index + lane));
+            }
+        }
+        index += 4;
+    }
+
+    while index < count {
+        let distance = hamming_distance_neon_fixed::<WIDTH>(
+            big_array.as_ptr().add(index * WIDTH),
+            small_array.as_ptr(),
+        );
+        if within_fixed_threshold(distance, max_dist) {
+            matches.push((distance, index));
+        }
+        index += 1;
+    }
+    matches
+}
+
+pub(crate) fn array_first_neon_16(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    unsafe { array_first_neon::<16>(big_array, small_array, max_dist) }
+}
+
+pub(crate) fn array_best_neon_16(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    unsafe { array_best_neon::<16>(big_array, small_array, max_dist) }
+}
+
+pub(crate) fn array_all_neon_16(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    unsafe { array_all_neon::<16>(big_array, small_array, max_dist) }
+}
+
+pub(crate) fn array_first_neon_32(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    unsafe { array_first_neon::<32>(big_array, small_array, max_dist) }
+}
+
+pub(crate) fn array_best_neon_32(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    unsafe { array_best_neon::<32>(big_array, small_array, max_dist) }
+}
+
+pub(crate) fn array_all_neon_32(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    unsafe { array_all_neon::<32>(big_array, small_array, max_dist) }
+}
+
 /// NEON vectorized hamming distance for hex strings.
 /// Processes 16 ASCII hex chars per iteration using:
 ///   - vqtbl1q_u8 for branchless hex→nibble conversion
