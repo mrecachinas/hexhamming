@@ -1453,9 +1453,17 @@ unsafe fn array_first_avx512<const WIDTH: usize>(
     single: unsafe fn(*const u8, *const u8) -> u64,
 ) -> Option<usize> {
     let count = big_array.len() / WIDTH;
-    let mut index = 0;
     let big_ptr = big_array.as_ptr();
     let query_ptr = small_array.as_ptr();
+    if count == 0 {
+        return None;
+    }
+
+    let first_distance = single(big_ptr, query_ptr);
+    if within_fixed_threshold(first_distance, max_dist) {
+        return Some(0);
+    }
+    let mut index = 1;
 
     while index + 4 <= count {
         let distances = batch4(big_ptr.add(index * WIDTH), query_ptr);
@@ -1491,10 +1499,18 @@ unsafe fn array_best_avx512<const WIDTH: usize>(
     single: unsafe fn(*const u8, *const u8) -> u64,
 ) -> Option<(u64, usize)> {
     let count = big_array.len() / WIDTH;
-    let mut best: Option<(u64, usize)> = None;
-    let mut index = 0;
     let big_ptr = big_array.as_ptr();
     let query_ptr = small_array.as_ptr();
+    if count == 0 {
+        return None;
+    }
+
+    let first_distance = single(big_ptr, query_ptr);
+    let mut best = within_fixed_threshold(first_distance, max_dist).then_some((first_distance, 0));
+    if first_distance == 0 {
+        return best;
+    }
+    let mut index = 1;
 
     while index + 4 <= count {
         let distances = batch4(big_ptr.add(index * WIDTH), query_ptr);
