@@ -1997,8 +1997,8 @@ mod tests {
     }
 
     // `best` must return the lowest index among ties and short-circuit on
-    // an exact match (distance == 0). Include a first-record exact match
-    // followed by later exact matches to guarantee both conditions.
+    // an exact match (distance == 0). Include several exact matches to
+    // guarantee both conditions.
     #[test]
     fn avx512_scanner_best_preserves_lowest_index_tie() {
         if !avx512_scanner_hw_available() {
@@ -2016,7 +2016,7 @@ mod tests {
             big[i * width..(i + 1) * width].copy_from_slice(&small);
             big[i * width] ^= 0x01;
         }
-        assert_eq!(unsafe { array_first_avx512_16(&big, &small, -1) }, Some(3));
+        assert_eq!(unsafe { array_first_avx512_16(&big, &small, 0) }, Some(3));
         assert_eq!(
             unsafe { array_best_avx512_16(&big, &small, -1) },
             Some((0, 3))
