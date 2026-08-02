@@ -138,11 +138,11 @@ impl SimpleByteBuffer {
         self.raw.len as usize
     }
 
-    /// SAFETY: caller must not alias the returned pointer with any other
-    /// borrow, and the guard must outlive all use of the pointer.
+    /// The pointer is valid while the pinned guard is alive. Dereferencing it
+    /// or constructing references from it remains the caller's responsibility.
     #[inline]
-    unsafe fn raw_mut_ptr(self: Pin<&mut Self>) -> *mut u8 {
-        let this = self.get_unchecked_mut();
+    fn raw_mut_ptr(mut self: Pin<&mut Self>) -> *mut u8 {
+        let this = unsafe { self.as_mut().get_unchecked_mut() };
         if this.raw.len == 0 {
             std::ptr::NonNull::<u8>::dangling().as_ptr()
         } else {
@@ -750,7 +750,7 @@ fn hamming_distances_bytes_into(
     let out_len = buf_out.len();
     // SAFETY: pointer captured while GIL is still held; the pinned guard keeps
     // the buffer exported for the entire call including any detached region.
-    let out_ptr = unsafe { buf_out.as_mut().raw_mut_ptr() };
+    let out_ptr = buf_out.as_mut().raw_mut_ptr();
     // Passing raw pointers into `py.detach` requires the closure to satisfy
     // `Ungil`. `*mut u8` is `!Sync`, so shipping the value as a `usize` and
     // rematerializing it inside the closure keeps the closure `Ungil`-clean.
@@ -980,8 +980,8 @@ fn check_bytes_arrays_all_within_dist_into(
     let d_len = buf_d.len();
     let i_len = buf_i.len();
     // SAFETY: pointers captured under GIL; pinned guards outlive detached use.
-    let d_ptr_addr = unsafe { buf_d.as_mut().raw_mut_ptr() } as usize;
-    let i_ptr_addr = unsafe { buf_i.as_mut().raw_mut_ptr() } as usize;
+    let d_ptr_addr = buf_d.as_mut().raw_mut_ptr() as usize;
+    let i_ptr_addr = buf_i.as_mut().raw_mut_ptr() as usize;
     if buffer_ranges_overlap(
         d_ptr_addr as *const u8,
         d_len,
