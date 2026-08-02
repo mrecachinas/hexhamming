@@ -182,6 +182,19 @@ immutable that is a very slow operation. Use a ``bytearray`` instead, and cast i
 Benchmark
 ---------
 
+For repeatable AVX2 and AVX-512 investigations, run the same checkout three
+times on each representative x86 machine:
+
+.. code-block:: bash
+
+    scripts/benchmark_x86.sh before
+    # Apply the candidate optimization, then:
+    scripts/benchmark_x86.sh after
+
+The script records CPU features and tool versions alongside Criterion output
+and end-to-end Python benchmark JSON. Compare results only between runs from
+the same machine.
+
 All benchmarks were run on an Apple M4 Max (ARM64, 16 logical cores, 64 GiB)
 with hexhamming v3.0.0, ``rustc`` 1.97.1, and Python 3.14.6. Values are the
 median of the means from three independent runs.
