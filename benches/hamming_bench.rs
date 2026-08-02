@@ -27,7 +27,7 @@ fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
 /// Benchmark hex hamming distance across all available algorithms
 fn bench_hex_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
-        &["classic", "native", "sse", "avx2", "avx512"]
+        &["classic", "sse", "avx2", "avx512"]
     } else if cfg!(target_arch = "aarch64") {
         &["classic", "neon"]
     } else {
@@ -58,7 +58,7 @@ fn bench_hex_by_algo(c: &mut Criterion) {
 /// Benchmark bytes hamming distance across all available algorithms
 fn bench_bytes_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
-        &["classic", "sse", "avx2", "avx512"]
+        &["classic", "native", "sse", "avx2", "avx512"]
     } else if cfg!(target_arch = "aarch64") {
         &["classic", "native", "neon"]
     } else {
