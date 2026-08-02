@@ -637,10 +637,6 @@ pub unsafe fn hamming_distance_bytes_avx512(a: &[u8], b: &[u8], max_dist: i64) -
     let length = a.len();
     let mut i = 0;
 
-    if length < 64 {
-        return hamming_distance_bytes_avx2(a, b, max_dist);
-    }
-
     let zero = _mm512_setzero_si512();
 
     if max_dist < 0 {
@@ -1319,4 +1315,34 @@ unsafe fn hamming_distance_string_classic_with_max(
         i += 1;
     }
     Ok(difference)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avx512_masked_byte_inputs_match_scalar_results() {
+        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512bitalg") {
+            return;
+        }
+
+        for length in [1usize, 7, 8, 15, 16, 31, 32, 48, 63] {
+            let a = vec![0xFF; length];
+            let b = vec![0x00; length];
+            let expected = (length * 8) as u64;
+
+            unsafe {
+                assert_eq!(hamming_distance_bytes_avx512(&a, &b, -1), expected);
+                assert_eq!(
+                    hamming_distance_bytes_avx512(&a, &b, expected as i64),
+                    expected
+                );
+                assert_eq!(
+                    hamming_distance_bytes_avx512(&a, &b, expected as i64 - 1),
+                    u64::MAX
+                );
+            }
+        }
+    }
 }
