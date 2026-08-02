@@ -511,8 +511,22 @@ fn array_oracle(
 
 #[test]
 fn test_fixed_width_array_scanners_match_randomized_oracle() {
-    for algorithm in ["native", "classic"] {
-        crate::set_algorithm(algorithm).unwrap();
+    // On x86 the AVX-512 cross-record scanners are only reachable when the
+    // active algorithm is `native` or `avx512`, so iterate through both to
+    // exercise the specialized (widths 16 & 32) and the generic paths. On
+    // aarch64 the same iteration covers the NEON fixed-width scanners and
+    // the scalar fallback. `set_algorithm` returns `Err` when the CPU lacks
+    // the requested extension, and we silently skip that iteration so this
+    // test remains portable.
+    let algorithms: &[&str] = if cfg!(target_arch = "x86_64") {
+        &["native", "avx512", "classic"]
+    } else {
+        &["native", "classic"]
+    };
+    for &algorithm in algorithms {
+        if crate::set_algorithm(algorithm).is_err() {
+            continue;
+        }
         for &width in &[1usize, 3, 7, 15, 16, 17, 31, 32, 33] {
             let count = 37;
             let mut state = 0xA5A5_1234_5678_9ABCu64 ^ width as u64;
