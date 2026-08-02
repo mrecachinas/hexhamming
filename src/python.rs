@@ -225,8 +225,7 @@ fn hamming_distance_bytes(
     let mut buf_b = std::pin::pin!(SimpleByteBuffer::new());
     buf_a.as_mut().acquire(a)?;
     buf_b.as_mut().acquire(b)?;
-    let a_slice = unsafe { buf_a.as_ref().as_slice() };
-    let b_slice = unsafe { buf_b.as_ref().as_slice() };
+    let (a_slice, b_slice) = unsafe { (buf_a.as_ref().as_slice(), buf_b.as_ref().as_slice()) };
 
     if a_slice.len() != b_slice.len() {
         return Err(PyValueError::new_err("bytes are NOT the same length"));
@@ -369,8 +368,7 @@ fn check_bytes_within_dist(
     let mut buf_b = std::pin::pin!(SimpleByteBuffer::new());
     buf_a.as_mut().acquire(a)?;
     buf_b.as_mut().acquire(b)?;
-    let a_slice = unsafe { buf_a.as_ref().as_slice() };
-    let b_slice = unsafe { buf_b.as_ref().as_slice() };
+    let (a_slice, b_slice) = unsafe { (buf_a.as_ref().as_slice(), buf_b.as_ref().as_slice()) };
 
     if a_slice.is_empty() || b_slice.is_empty() {
         return Err(PyValueError::new_err("array size must be >0"));
@@ -646,8 +644,7 @@ where
     let mut buf_b = std::pin::pin!(SimpleByteBuffer::new());
     buf_a.as_mut().acquire(a)?;
     buf_b.as_mut().acquire(b)?;
-    let a_slice = unsafe { buf_a.as_ref().as_slice() };
-    let b_slice = unsafe { buf_b.as_ref().as_slice() };
+    let (a_slice, b_slice) = unsafe { (buf_a.as_ref().as_slice(), buf_b.as_ref().as_slice()) };
     // General buffer-protocol inputs may be writable. Keep the GIL attached
     // while reading them so another Python thread cannot mutate the storage.
     f(a_slice, b_slice, false)
