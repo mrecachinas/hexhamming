@@ -763,13 +763,8 @@ fn hamming_distances_bytes_packed<'py>(
         .checked_mul(8)
         .ok_or_else(|| PyValueError::new_err("distance buffer size overflows platform usize"))?;
     PyBytes::new_with(py, byte_len, |dst| {
-        // SAFETY: allocated exactly distances.len()*8 bytes; write_unaligned
-        // supports arbitrary alignment of dst.
-        let ptr = dst.as_mut_ptr();
-        for (i, d) in distances.iter().enumerate() {
-            unsafe {
-                std::ptr::write_unaligned(ptr.add(i * 8) as *mut u64, d.to_le());
-            }
+        for (chunk, d) in dst.chunks_exact_mut(8).zip(&distances) {
+            chunk.copy_from_slice(&d.to_le_bytes());
         }
         Ok(())
     })
@@ -987,20 +982,14 @@ fn check_bytes_arrays_all_within_dist_packed<'py>(
         .checked_mul(4)
         .ok_or_else(|| PyValueError::new_err("index buffer size overflows platform usize"))?;
     let d_bytes = PyBytes::new_with(py, d_byte_len, |dst| {
-        let ptr = dst.as_mut_ptr();
-        for (i, v) in dists.iter().enumerate() {
-            unsafe {
-                std::ptr::write_unaligned(ptr.add(i * 2) as *mut u16, v.to_le());
-            }
+        for (chunk, value) in dst.chunks_exact_mut(2).zip(&dists) {
+            chunk.copy_from_slice(&value.to_le_bytes());
         }
         Ok(())
     })?;
     let i_bytes = PyBytes::new_with(py, i_byte_len, |dst| {
-        let ptr = dst.as_mut_ptr();
-        for (i, v) in idxs.iter().enumerate() {
-            unsafe {
-                std::ptr::write_unaligned(ptr.add(i * 4) as *mut u32, v.to_le());
-            }
+        for (chunk, value) in dst.chunks_exact_mut(4).zip(&idxs) {
+            chunk.copy_from_slice(&value.to_le_bytes());
         }
         Ok(())
     })?;
