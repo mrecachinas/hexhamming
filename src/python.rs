@@ -57,17 +57,35 @@ impl SimpleByteBuffer {
     }
 
     fn acquire(mut self: Pin<&mut Self>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.as_mut().acquire_mode(obj, false)
+    }
+
+    fn acquire_writable(mut self: Pin<&mut Self>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.as_mut().acquire_mode(obj, true)
+    }
+
+    fn acquire_mode(
+        mut self: Pin<&mut Self>,
+        obj: &Bound<'_, PyAny>,
+        writable: bool,
+    ) -> PyResult<()> {
         let this = unsafe { self.as_mut().get_unchecked_mut() };
-        let result = unsafe {
-            ffi::PyObject_GetBuffer(
-                obj.as_ptr(),
-                &mut this.raw,
-                ffi::PyBUF_ND | ffi::PyBUF_FORMAT,
-            )
+        let flags = if writable {
+            ffi::PyBUF_C_CONTIGUOUS | ffi::PyBUF_FORMAT | ffi::PyBUF_WRITABLE
+        } else {
+            ffi::PyBUF_ND | ffi::PyBUF_FORMAT
         };
+        let result = unsafe { ffi::PyObject_GetBuffer(obj.as_ptr(), &mut this.raw, flags) };
         if result != 0 {
             let _ = PyErr::fetch(obj.py());
-            let message = if unsafe { ffi::PyObject_CheckBuffer(obj.as_ptr()) } != 0 {
+            let supports_buffer = unsafe { ffi::PyObject_CheckBuffer(obj.as_ptr()) } != 0;
+            let message = if writable {
+                if supports_buffer {
+                    "output must be a writable, C-contiguous buffer"
+                } else {
+                    "output must support the buffer protocol"
+                }
+            } else if supports_buffer {
                 "input must be contiguous"
             } else {
                 "error occurred while parsing arguments"
@@ -76,19 +94,30 @@ impl SimpleByteBuffer {
         }
         this.acquired = true;
 
+        if writable && this.raw.readonly != 0 {
+            return Err(PyValueError::new_err("output must be writable"));
+        }
         let compatible_format = if this.raw.format.is_null() {
-            false
+            writable
         } else {
             let format = unsafe { CStr::from_ptr(this.raw.format) };
             <u8 as Element>::is_compatible_format(format)
         };
         if this.raw.itemsize != 1 || !compatible_format {
-            return Err(PyValueError::new_err(
-                "error occurred while parsing arguments",
-            ));
+            let message = if writable {
+                "output must be a byte buffer (itemsize 1)"
+            } else {
+                "error occurred while parsing arguments"
+            };
+            return Err(PyValueError::new_err(message));
         }
         if this.raw.len < 0 || (this.raw.buf.is_null() && this.raw.len != 0) {
-            return Err(PyValueError::new_err("invalid buffer view"));
+            let message = if writable {
+                "invalid output buffer"
+            } else {
+                "invalid buffer view"
+            };
+            return Err(PyValueError::new_err(message));
         }
         Ok(())
     }
@@ -102,79 +131,6 @@ impl SimpleByteBuffer {
             return &[];
         }
         std::slice::from_raw_parts(raw.buf as *const u8, raw.len as usize)
-    }
-}
-
-impl Drop for SimpleByteBuffer {
-    fn drop(&mut self) {
-        if self.acquired {
-            let _ = Python::try_attach(|_| unsafe {
-                ffi::PyBuffer_Release(&mut self.raw);
-            });
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Writable buffer guard — used by `*_into` batch APIs.
-// ---------------------------------------------------------------------------
-
-struct WritableByteBuffer {
-    raw: ffi::Py_buffer,
-    acquired: bool,
-    _pin: PhantomPinned,
-}
-
-impl WritableByteBuffer {
-    fn new() -> Self {
-        Self {
-            raw: ffi::Py_buffer::new(),
-            acquired: false,
-            _pin: PhantomPinned,
-        }
-    }
-
-    fn acquire(mut self: Pin<&mut Self>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
-        let this = unsafe { self.as_mut().get_unchecked_mut() };
-        // C-contiguous + writable + format keeps this API strict: caller-side
-        // non-contiguous or readonly buffers are rejected up front rather than
-        // producing surprising partial writes.
-        let result = unsafe {
-            ffi::PyObject_GetBuffer(
-                obj.as_ptr(),
-                &mut this.raw,
-                ffi::PyBUF_C_CONTIGUOUS | ffi::PyBUF_FORMAT | ffi::PyBUF_WRITABLE,
-            )
-        };
-        if result != 0 {
-            let _ = PyErr::fetch(obj.py());
-            let message = if unsafe { ffi::PyObject_CheckBuffer(obj.as_ptr()) } != 0 {
-                "output must be a writable, C-contiguous buffer"
-            } else {
-                "output must support the buffer protocol"
-            };
-            return Err(PyValueError::new_err(message));
-        }
-        this.acquired = true;
-
-        if this.raw.readonly != 0 {
-            return Err(PyValueError::new_err("output must be writable"));
-        }
-        let compatible_format = if this.raw.format.is_null() {
-            true
-        } else {
-            let format = unsafe { CStr::from_ptr(this.raw.format) };
-            <u8 as Element>::is_compatible_format(format)
-        };
-        if this.raw.itemsize != 1 || !compatible_format {
-            return Err(PyValueError::new_err(
-                "output must be a byte buffer (itemsize 1)",
-            ));
-        }
-        if this.raw.len < 0 || (this.raw.buf.is_null() && this.raw.len != 0) {
-            return Err(PyValueError::new_err("invalid output buffer"));
-        }
-        Ok(())
     }
 
     #[inline]
@@ -195,7 +151,7 @@ impl WritableByteBuffer {
     }
 }
 
-impl Drop for WritableByteBuffer {
+impl Drop for SimpleByteBuffer {
     fn drop(&mut self) {
         if self.acquired {
             let _ = Python::try_attach(|_| unsafe {
@@ -789,8 +745,8 @@ fn hamming_distances_bytes_into(
     // then the writable output buffer. Any Bound<'_, PyAny> references stay
     // out of the detach closure — only raw slices and pointers cross the GIL
     // boundary, which the pinned guards keep alive for the whole call.
-    let mut buf_out = std::pin::pin!(WritableByteBuffer::new());
-    buf_out.as_mut().acquire(output)?;
+    let mut buf_out = std::pin::pin!(SimpleByteBuffer::new());
+    buf_out.as_mut().acquire_writable(output)?;
     let out_len = buf_out.len();
     // SAFETY: pointer captured while GIL is still held; the pinned guard keeps
     // the buffer exported for the entire call including any detached region.
@@ -1017,10 +973,10 @@ fn check_bytes_arrays_all_within_dist_into(
     if max_dist < 0 {
         return Err(PyValueError::new_err("`max_dist` must be >=0"));
     }
-    let mut buf_d = std::pin::pin!(WritableByteBuffer::new());
-    let mut buf_i = std::pin::pin!(WritableByteBuffer::new());
-    buf_d.as_mut().acquire(out_distances)?;
-    buf_i.as_mut().acquire(out_indices)?;
+    let mut buf_d = std::pin::pin!(SimpleByteBuffer::new());
+    let mut buf_i = std::pin::pin!(SimpleByteBuffer::new());
+    buf_d.as_mut().acquire_writable(out_distances)?;
+    buf_i.as_mut().acquire_writable(out_indices)?;
     let d_len = buf_d.len();
     let i_len = buf_i.len();
     // SAFETY: pointers captured under GIL; pinned guards outlive detached use.
