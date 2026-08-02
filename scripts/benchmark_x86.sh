@@ -8,6 +8,7 @@ fi
 
 label="${1:-working-tree}"
 output_dir="${2:-benchmark-results/${label}}"
+rust_filter="${3:-}"
 mkdir -p "${output_dir}"
 
 {
@@ -29,17 +30,27 @@ python3 -m pip install --quiet .
 
 for run in 1 2 3; do
     echo "Rust benchmark run ${run}/3"
-    cargo bench --bench hamming_bench -- \
-        --noplot \
-        --save-baseline "${label}-rust-${run}" \
-        2>&1 | tee "${output_dir}/criterion-${run}.txt"
+    if [[ -n "${rust_filter}" ]]; then
+        cargo bench --bench hamming_bench -- \
+            "${rust_filter}" \
+            --noplot \
+            --save-baseline "${label}-rust-${run}" \
+            2>&1 | tee "${output_dir}/criterion-${run}.txt"
+    else
+        cargo bench --bench hamming_bench -- \
+            --noplot \
+            --save-baseline "${label}-rust-${run}" \
+            2>&1 | tee "${output_dir}/criterion-${run}.txt"
+    fi
 
-    echo "Python benchmark run ${run}/3"
-    python3 -m pytest test/ \
-        -k bench \
-        --benchmark-only \
-        --benchmark-disable-gc \
-        --benchmark-json="${output_dir}/python-${run}.json"
+    if [[ "${SKIP_PYTHON:-0}" != "1" ]]; then
+        echo "Python benchmark run ${run}/3"
+        python3 -m pytest test/ \
+            -k bench \
+            --benchmark-only \
+            --benchmark-disable-gc \
+            --benchmark-json="${output_dir}/python-${run}.json"
+    fi
 done
 
 echo "Results written to ${output_dir}"

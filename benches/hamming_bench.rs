@@ -9,7 +9,7 @@ use hexhamming::hex_hamming_distance_pack;
 
 // Hex sizes are character counts; byte sizes are the corresponding decoded lengths.
 const HEX_SIZES: [usize; 5] = [16, 32, 64, 128, 254];
-const BYTE_SIZES: [usize; 8] = [8, 16, 32, 64, 127, 128, 256, 512];
+const BYTE_SIZES: [usize; 12] = [8, 16, 32, 48, 63, 64, 65, 96, 127, 128, 256, 512];
 
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
@@ -27,7 +27,7 @@ fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
 /// Benchmark hex hamming distance across all available algorithms
 fn bench_hex_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
-        &["classic", "sse", "avx2", "avx512"]
+        &["classic", "native", "sse", "avx2", "avx512"]
     } else if cfg!(target_arch = "aarch64") {
         &["classic", "neon"]
     } else {
