@@ -43,18 +43,10 @@ pub fn bytes_pairwise_distances(
         return Ok(Vec::new());
     }
     let kernel = select_bytes_kernel_for_width(element_size);
-    let mut out: Vec<u64> = Vec::with_capacity(count);
-    pairwise_distances_loop(a, b, element_size, kernel, |i, d| {
-        // SAFETY: capacity == count preallocated, i < count.
-        unsafe {
-            let dst = out.as_mut_ptr().add(i);
-            std::ptr::write(dst, d);
-        }
-        if i + 1 == count {
-            unsafe { out.set_len(count) };
-        }
-    });
-    Ok(out)
+    Ok(a.chunks_exact(element_size)
+        .zip(b.chunks_exact(element_size))
+        .map(|(a_chunk, b_chunk)| kernel(a_chunk, b_chunk, -1))
+        .collect())
 }
 
 /// Compute Hamming distances and write them as little-endian `u64` values into
