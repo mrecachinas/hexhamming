@@ -9,7 +9,7 @@ use hexhamming::hex_hamming_distance_pack;
 
 // Hex sizes are character counts; byte sizes are the corresponding decoded lengths.
 const HEX_SIZES: [usize; 5] = [16, 32, 64, 128, 254];
-const BYTE_SIZES: [usize; 8] = [8, 16, 32, 64, 127, 128, 256, 512];
+const BYTE_SIZES: [usize; 12] = [8, 16, 32, 48, 63, 64, 65, 96, 127, 128, 256, 512];
 
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
@@ -58,7 +58,7 @@ fn bench_hex_by_algo(c: &mut Criterion) {
 /// Benchmark bytes hamming distance across all available algorithms
 fn bench_bytes_by_algo(c: &mut Criterion) {
     let algos: &[&str] = if cfg!(target_arch = "x86_64") {
-        &["classic", "sse", "avx2", "avx512"]
+        &["classic", "native", "sse", "avx2", "avx512"]
     } else if cfg!(target_arch = "aarch64") {
         &["classic", "native", "neon"]
     } else {
@@ -358,6 +358,83 @@ fn bench_fixed_width_array_matrix(c: &mut Criterion) {
     }
 }
 
+/// A/B comparison between the algorithm paths that DO and DO NOT engage the
+/// fixed-width cross-record scanner. `select_array_scanner_for_width` opts in
+/// only for `native`/`neon` on aarch64 and `native`/`avx512` on x86; other
+/// algorithms fall back to the per-record byte kernel. Running the same
+/// scenarios under both toggles measures the end-to-end dispatch alternatives.
+///
+/// Only runs on architectures where a fixed-width scanner is available.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn bench_fixed_width_scanner_vs_kernel(c: &mut Criterion) {
+    // The x86 comparison includes both cross-record batching and the wider
+    // AVX-512 BITALG popcount; it is an end-to-end comparison against the
+    // narrower AVX2 per-record fallback, not an isolated batching benchmark.
+    let pairs: &[(&str, &str)] = if cfg!(target_arch = "x86_64") {
+        &[("avx512", "avx2")]
+    } else {
+        &[("native", "classic")]
+    };
+
+    for &(scanner_algo, kernel_algo) in pairs {
+        let scanner_ok = set_algorithm(scanner_algo).is_ok();
+        set_algorithm("native").ok();
+        let kernel_ok = set_algorithm(kernel_algo).is_ok();
+        set_algorithm("native").ok();
+        if !scanner_ok || !kernel_ok {
+            continue;
+        }
+
+        for &(role, algo) in &[("scanner", scanner_algo), ("kernel", kernel_algo)] {
+            if set_algorithm(algo).is_err() {
+                continue;
+            }
+            let mut group = c.benchmark_group(format!(
+                "array_scanner/{scanner_algo}_vs_{kernel_algo}/{role}"
+            ));
+            for &width in &[16usize, 32] {
+                // Same random-no-match scenario as the C4 baseline (see the
+                // catalog benchmarks in `array_api/512x16_random_no_match`) to
+                // allow before/after comparison at that data point.
+                for &count in &[512usize, 1024] {
+                    let small = pseudo_random_bytes(width, 0x51 + width as u64);
+                    let big = pseudo_random_bytes(count * width, 0xA1 + width as u64);
+                    group.bench_function(format!("{width}byte/{count}/first"), |bencher| {
+                        bencher.iter(|| {
+                            bytes_array_first_within_dist(
+                                black_box(&big),
+                                black_box(&small),
+                                black_box(0),
+                            )
+                        })
+                    });
+                    group.bench_function(format!("{width}byte/{count}/best"), |bencher| {
+                        bencher.iter(|| {
+                            bytes_array_best_within_dist(
+                                black_box(&big),
+                                black_box(&small),
+                                black_box(0),
+                            )
+                        })
+                    });
+                    group.bench_function(format!("{width}byte/{count}/all"), |bencher| {
+                        bencher.iter(|| {
+                            bytes_array_all_within_dist(
+                                black_box(&big),
+                                black_box(&small),
+                                black_box(0),
+                            )
+                        })
+                    });
+                }
+            }
+            group.finish();
+        }
+    }
+
+    set_algorithm("native").ok();
+}
+
 fn bench_fixed_width_parallel_crossover(c: &mut Criterion) {
     const PAR_THRESHOLDS: [(&str, usize); 2] = [
         ("legacy", 5 * 1024 * 1024),
@@ -428,10 +505,23 @@ criterion_group!(
     bench_array_api,
     bench_array_random_and_boundaries,
     bench_fixed_width_array_matrix,
+    bench_fixed_width_scanner_vs_kernel,
     bench_fixed_width_parallel_crossover,
     bench_hex_string_pack
 );
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
+criterion_group!(
+    benches,
+    bench_hex_by_algo,
+    bench_bytes_by_algo,
+    bench_bytes_within_dist,
+    bench_array_api,
+    bench_array_random_and_boundaries,
+    bench_fixed_width_array_matrix,
+    bench_fixed_width_scanner_vs_kernel,
+    bench_fixed_width_parallel_crossover
+);
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 criterion_group!(
     benches,
     bench_hex_by_algo,

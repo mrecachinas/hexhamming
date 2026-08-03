@@ -55,7 +55,38 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
         };
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Only opt in to the AVX-512 cross-record scanners when the user
+        // hasn't explicitly requested a narrower or scalar backend, and only
+        // when the host actually supports the required feature set. This
+        // preserves observable behavior on hosts without AVX-512 BITALG and
+        // for callers that explicitly set "classic"/"sse"/"avx2".
+        let algo = CURRENT_ALGO.load(Ordering::Relaxed);
+        if (algo == ALGO_NATIVE || algo == ALGO_AVX512)
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512bitalg")
+        {
+            return match width {
+                16 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx512_16_dispatch,
+                    best: crate::x86_simd::array_best_avx512_16_dispatch,
+                    all: crate::x86_simd::array_all_avx512_16_dispatch,
+                }),
+                32 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx512_32_dispatch,
+                    best: crate::x86_simd::array_best_avx512_32_dispatch,
+                    all: crate::x86_simd::array_all_avx512_32_dispatch,
+                }),
+                _ => None,
+            };
+        }
+        let _ = width;
+        None
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let _ = width;
         None

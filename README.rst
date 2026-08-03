@@ -65,7 +65,7 @@ Lastly, I wanted to minimize dependencies, meaning you do not need to install
 As of v3.0.0, ``hexhamming`` is written in Rust using `PyO3 <https://pyo3.rs>`_
 and `maturin <https://www.maturin.rs>`_, providing memory safety, GIL release
 during computation, and free-threaded Python support while maintaining the same
-SIMD-accelerated performance (SSE4.1, AVX2, NEON).
+SIMD-accelerated performance (SSE4.1, AVX2, AVX-512 BITALG, NEON).
 
 Installation
 -------------
@@ -258,6 +258,62 @@ more than ``u32::MAX`` records, are rejected.
 
 Benchmark
 ---------
+
+For repeatable AVX2 and AVX-512 investigations, run the same checkout three
+times on each representative x86 machine:
+
+.. code-block:: bash
+
+    scripts/benchmark_x86.sh before
+    # Apply the candidate optimization, then:
+    scripts/benchmark_x86.sh after
+
+The script records CPU features and tool versions alongside Criterion output
+and end-to-end Python benchmark JSON. Compare results only between runs from
+the same machine.
+
+AVX-512 results
+~~~~~~~~~~~~~~~~
+
+Three-run medians on a Google Cloud ``c4-standard-4`` with an Intel Xeon
+Platinum 8581C (Emerald Rapids):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Workload
+     - Before
+     - After
+     - Speedup
+   * - Python 1024x16 first, random/no-match
+     - 3.222 us
+     - 0.679 us
+     - 4.75x
+   * - Python 1024x16 best, random/no-match
+     - 3.720 us
+     - 0.651 us
+     - 5.72x
+   * - Python 1024x16 all, random/no-match
+     - 3.466 us
+     - 0.710 us
+     - 4.88x
+   * - Python 1024x32 first, random/no-match
+     - 3.199 us
+     - 1.278 us
+     - 2.50x
+   * - Python 1024x32 best, random/no-match
+     - 3.729 us
+     - 1.383 us
+     - 2.70x
+   * - Python 1024x32 all, random/no-match
+     - 3.445 us
+     - 1.377 us
+     - 2.50x
+
+The AVX-512 byte kernel also uses masked loads below 64 bytes, improving the
+measured 16-, 32-, 48-, and 63-byte Rust paths by 33%, 50%, 70%, and 194%
+respectively. AVX2-only tuning remains hardware-dependent and should be
+measured separately on a machine without AVX-512.
 
 All benchmarks were run on an Apple M4 Max (ARM64, 16 logical cores, 64 GiB)
 with hexhamming v3.0.0, ``rustc`` 1.97.1, and Python 3.14.6. Values are the
