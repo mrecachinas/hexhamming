@@ -9,14 +9,14 @@ permissions:
   pull-requests: write
 
 jobs:
-  benchmark-base:
-    name: Benchmark base branch
+  benchmark:
+    name: Benchmark base and PR
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout base branch
+      - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -27,51 +27,47 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-benchmark
-          pip install .
 
-      - name: Run benchmarks
+      - name: Record benchmark host
         run: |
-          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
+          uname -a
+          lscpu
 
-      - name: Upload benchmark results
+      - name: Benchmark base branch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --detach "$BASE_SHA"
+          pip install --force-reinstall --no-deps .
+          mkdir -p base
+          pytest test/ -k bench --benchmark-only --benchmark-json=base/results.json --benchmark-disable-gc
+
+      - name: Benchmark PR branch
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout --detach "$HEAD_SHA"
+          pip install --force-reinstall --no-deps .
+          mkdir -p pr
+          pytest test/ -k bench --benchmark-only --benchmark-json=pr/results.json --benchmark-disable-gc
+
+      - name: Upload base benchmark results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-base
-          path: results.json
+          path: base/results.json
           retention-days: 1
 
-  benchmark-pr:
-    name: Benchmark PR branch
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-benchmark
-          pip install .
-
-      - name: Run benchmarks
-        run: |
-          pytest test/ -k bench --benchmark-only --benchmark-json=results.json --benchmark-disable-gc
-
-      - name: Upload benchmark results
+      - name: Upload PR benchmark results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-pr
-          path: results.json
+          path: pr/results.json
           retention-days: 1
 
   compare:
     name: Compare benchmarks
-    needs: [benchmark-base, benchmark-pr]
+    needs: benchmark
     runs-on: ubuntu-latest
     steps:
       - name: Download base benchmark results
