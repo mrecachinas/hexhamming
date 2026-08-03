@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 // enabled, `python` registers the PyO3 module and maps Python errors/GIL policy
 // onto the same dispatch functions used by Rust callers.
 mod api;
+mod batch;
 mod classic;
 mod hex;
 mod native;
@@ -33,6 +34,11 @@ mod tests;
 mod x86_simd;
 
 pub use api::*;
+pub use batch::{
+    bytes_array_all_many_within_dist, bytes_array_all_within_dist_into,
+    bytes_array_all_within_dist_packed, bytes_array_best_many_within_dist,
+    bytes_array_first_many_within_dist, bytes_pairwise_distances, bytes_pairwise_distances_into,
+};
 
 /// Lookup table for popcount of 4-bit values (0-15).
 /// Hex string distance is computed one nibble at a time, so this avoids a

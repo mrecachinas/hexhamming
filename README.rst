@@ -179,6 +179,89 @@ distance less than ``max_dist``, or ``[]`` if none do.
 Tip: When you're assembling the long array of records to compare against, don't concatenate the different ``bytes`` together. As they're
 immutable that is a very slow operation. Use a ``bytearray`` instead, and cast it to ``bytes`` at the end. See https://www.guyrutenberg.com/2020/04/04/fast-bytes-concatenation-in-python/ for more info and tests.
 
+Batch APIs
+~~~~~~~~~~
+
+The per-call APIs above are still the right choice for one-off distances, but
+computing many distances in Python for-loops pays repeated FFI overhead.
+The batch APIs below fold that overhead into a single call by taking
+contiguous buffers.
+
+Pairwise distances between two equal-length contiguous buffers of fixed-width
+records:
+
+::
+
+    >>> from hexhamming import (
+    ...     hamming_distances_bytes,
+    ...     hamming_distances_bytes_packed,
+    ...     hamming_distances_bytes_into,
+    ... )
+    >>> a = b"\xde\xad\xbe\xef" * 4
+    >>> b = b"\x00" * 16
+    >>> hamming_distances_bytes(a, b, 4)      # list[int]
+    [24, 24, 24, 24]
+    >>> hamming_distances_bytes_packed(a, b, 4).hex()   # little-endian u64 bytes
+    '1800000000000000180000000000000018000000000000001800000000000000'
+    >>> out = bytearray(4 * 8)
+    >>> hamming_distances_bytes_into(a, b, 4, out)      # writes u64 LE into `out`
+    4
+
+``hamming_distances_bytes_into`` requires ``out`` to be a writable,
+C-contiguous byte buffer of exactly ``count * 8`` bytes; read-only,
+non-contiguous, or wrong-size outputs raise ``ValueError``. Writable ``_into``
+APIs are unavailable on free-threaded Python because the buffer protocol does
+not provide exclusive access; use the corresponding ``_packed`` API there.
+On standard Python builds, ``_into`` keeps the GIL while writing; use
+``_packed`` when detached computation is more important than buffer reuse.
+
+Multi-query catalog scans run one catalog against many contiguous queries in
+one call, mirroring the shape of repeated single-query calls:
+
+::
+
+    >>> from hexhamming import (
+    ...     check_bytes_arrays_first_many_within_dist,
+    ...     check_bytes_arrays_best_many_within_dist,
+    ...     check_bytes_arrays_all_many_within_dist,
+    ... )
+    >>> catalog = b"\xaa\xaa\xbb\xbb\xcc\xcc\xdd\xdd\xee\xee\xff\xff"
+    >>> queries = b"\xff\xff\xef\xfe"
+    >>> check_bytes_arrays_first_many_within_dist(catalog, queries, 2, 4)
+    [1, 4]
+    >>> check_bytes_arrays_best_many_within_dist(catalog, queries, 2, 4)
+    [(0, 5), (2, 4)]
+    >>> check_bytes_arrays_all_many_within_dist(catalog, queries, 2, 4)
+    [[(4, 1), (4, 3), (4, 4), (0, 5)], [(2, 4), (2, 5)]]
+
+Semantics match the single-query calls exactly: ``-1`` and ``(-1, -1)``
+sentinels for no-match, lowest-index tie-breaking for ``best_many``, exact-match
+short-circuiting, and ascending index order for ``all_many``.
+
+Dense/compact match transport for ``all_within_dist`` uses ``u16``
+distances and ``u32`` indices instead of Python tuples:
+
+::
+
+    >>> from hexhamming import (
+    ...     check_bytes_arrays_all_within_dist_packed,
+    ...     check_bytes_arrays_all_within_dist_into,
+    ... )
+    >>> dbytes, ibytes = check_bytes_arrays_all_within_dist_packed(catalog, b"\xff\xff", 4)
+    >>> [int.from_bytes(dbytes[i:i+2], "little") for i in range(0, len(dbytes), 2)]
+    [4, 4, 4, 0]
+    >>> d_out = bytearray(len(catalog) // 2 * 2)   # worst case: num_records * 2
+    >>> i_out = bytearray(len(catalog) // 2 * 4)   # worst case: num_records * 4
+    >>> check_bytes_arrays_all_within_dist_into(catalog, b"\xff\xff", 4, d_out, i_out)
+    4
+
+The ``_packed`` variant returns two ``bytes`` objects; ``_into`` writes into
+caller-provided writable buffers and returns the match count. Element widths
+whose maximum possible distance exceeds ``u16::MAX`` bits, and catalogs with
+more than ``u32::MAX`` records, are rejected. On free-threaded Python, use
+``_packed`` because writable ``_into`` buffers cannot be made exclusive through
+the Python buffer protocol.
+
 Benchmark
 ---------
 
@@ -371,3 +454,57 @@ at 64 KiB; generic scans parallelize with Rayon at 5 MiB, while the optimized
 16/32-byte NEON scanners use a measured 16 MiB crossover. The ``first`` variant
 additionally short-circuits on the first hit, so a match near the start is much
 faster than one near the end.
+
+Batch APIs vs. Python for-loops
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These numbers use ``.benchmarks/batch_measure.py`` (``timeit.repeat`` with 50
+calls per sample, three independent runs, median of medians) on the same M4
+Max. The "loop" columns run the equivalent single-call API inside a Python
+for-loop. Speedups are relative to the loop baseline.
+
+Pairwise distances between two contiguous buffers of ``count`` records:
+
+============================================  ==========  ==========  ==========  ==========
+Case                                          loop (ns)   list (ns)   packed (ns)  into (ns)
+============================================  ==========  ==========  ==========  ==========
+pairwise 100×16                                  15,796.7      598.3       287.5      211.7
+pairwise 1,000×16                              147,985.0    4,494.2     1,528.3    1,245.8
+pairwise 10,000×16                           1,424,663.3   43,612.5    14,660.8   11,720.8
+pairwise 100×32                                  16,091.7      821.7       511.7      438.3
+pairwise 1,000×32                              160,530.0    6,787.5     3,855.0    3,545.8
+pairwise 10,000×32                           1,542,458.3   66,835.8    37,700.8   34,721.7
+============================================  ==========  ==========  ==========  ==========
+
+Multi-query catalog scans against a 1,024×16-byte catalog with 100 queries:
+
+==================================================  ==========  ==========
+Case                                                loop (ns)   batch (ns)
+==================================================  ==========  ==========
+first_many 100×1024×16 (permissive threshold)         10,948.3       742.5
+best_many 100×1024×16 (max_dist=128)                  76,889.2    66,529.2
+==================================================  ==========  ==========
+
+Dense-match transport for a single query against a 1,024×16-byte catalog:
+
+==========================================  ==========  ==========  ==========
+Case                                        list (ns)   packed (ns)  into (ns)
+==========================================  ==========  ==========  ==========
+all 1024×16 (max_dist=128, all match)         30,681.7    3,067.5    2,022.5
+==========================================  ==========  ==========  ==========
+
+Interpretation:
+
+* Pairwise: the ``list`` API is 26–33× faster than the Python for-loop and is
+  the recommended default. ``packed`` and ``into`` skip the per-distance
+  Python ``int`` allocation for another 2–3× on top; use them when the caller
+  can consume little-endian ``u64`` bytes directly.
+* Multi-query ``first_many`` is a very large win (≈15×) because each inner
+  scan short-circuits on the first hit and Python-loop overhead dominates.
+  ``best_many`` and ``all_many`` are more modest wins (≈1.15–1.2×) because
+  their inner scans always traverse the whole catalog and the per-call FFI
+  overhead is proportionally smaller.
+* Dense ``all_within_dist``: ``packed`` avoids allocating ``num_records``
+  Python 2-tuples (≈10×); ``into`` additionally reuses caller-owned
+  buffers (≈15×) and matches the throughput of Rust code that never
+  touches the Python heap.
