@@ -662,6 +662,20 @@ fn buffer_ranges_overlap(a_ptr: *const u8, a_len: usize, b_ptr: *const u8, b_len
     a_start < b_end && b_start < a_end
 }
 
+#[inline]
+fn ensure_writable_into_supported() -> PyResult<()> {
+    #[cfg(Py_GIL_DISABLED)]
+    {
+        return Err(PyValueError::new_err(
+            "writable `_into` APIs are unavailable on free-threaded Python; use the packed API",
+        ));
+    }
+    #[cfg(not(Py_GIL_DISABLED))]
+    {
+        Ok(())
+    }
+}
+
 /// Compute Hamming distances between corresponding fixed-width records in `a`
 /// and `b`. Returns a list of `int` distances, one per record.
 ///
@@ -732,56 +746,58 @@ fn hamming_distances_bytes_packed<'py>(
 #[pyfunction]
 #[pyo3(signature = (a, b, element_size, output))]
 fn hamming_distances_bytes_into(
-    py: Python<'_>,
+    _py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     element_size: usize,
     output: &Bound<'_, PyAny>,
 ) -> PyResult<usize> {
-    // Acquire input buffers first (may be bytes fast-path or general buffer),
-    // then the writable output buffer. Any Bound<'_, PyAny> references stay
-    // out of the detach closure — only raw slices and pointers cross the GIL
-    // boundary, which the pinned guards keep alive for the whole call.
+    ensure_writable_into_supported()?;
     let mut buf_out = std::pin::pin!(SimpleByteBuffer::new());
     buf_out.as_mut().acquire_writable(output)?;
     let out_len = buf_out.len();
-    // SAFETY: pointer captured while GIL is still held; the pinned guard keeps
-    // the buffer exported for the entire call including any detached region.
-    let out_ptr = buf_out.as_mut().raw_mut_ptr();
-    // Passing raw pointers into `py.detach` requires the closure to satisfy
-    // `Ungil`. `*mut u8` is `!Sync`, so shipping the value as a `usize` and
-    // rematerializing it inside the closure keeps the closure `Ungil`-clean.
-    let out_ptr_addr = out_ptr as usize;
+    let out_ptr_addr = buf_out.as_mut().raw_mut_ptr() as usize;
 
-    with_two_readonly_buffers(a, b, |a_slice, b_slice, can_detach| {
-        let compute = || -> PyResult<usize> {
-            if buffer_ranges_overlap(
-                a_slice.as_ptr(),
-                a_slice.len(),
-                out_ptr_addr as *const u8,
-                out_len,
-            ) || buffer_ranges_overlap(
-                b_slice.as_ptr(),
-                b_slice.len(),
-                out_ptr_addr as *const u8,
-                out_len,
-            ) {
-                return Err(PyValueError::new_err(
-                    "output buffer must not overlap input buffers",
-                ));
-            }
-            // SAFETY: exclusive access to the writable buffer for the closure
-            // duration; the pinned guard keeps the memory alive.
-            let out_slice =
-                unsafe { std::slice::from_raw_parts_mut(out_ptr_addr as *mut u8, out_len) };
-            crate::bytes_pairwise_distances_into(a_slice, b_slice, element_size, out_slice)
-                .map_err(PyValueError::new_err)
-        };
-        if can_detach && a_slice.len() >= ARRAY_GIL_RELEASE_THRESHOLD {
-            py.detach(compute)
-        } else {
-            compute()
+    with_two_readonly_buffers(a, b, |a_slice, b_slice, _can_detach| {
+        if buffer_ranges_overlap(
+            a_slice.as_ptr(),
+            a_slice.len(),
+            out_ptr_addr as *const u8,
+            out_len,
+        ) || buffer_ranges_overlap(
+            b_slice.as_ptr(),
+            b_slice.len(),
+            out_ptr_addr as *const u8,
+            out_len,
+        ) {
+            return Err(PyValueError::new_err(
+                "output buffer must not overlap input buffers",
+            ));
         }
+        if element_size == 0 {
+            return Err(PyValueError::new_err("`element_size` must be >0"));
+        }
+        if a_slice.len() != b_slice.len() {
+            return Err(PyValueError::new_err("bytes are NOT the same length"));
+        }
+        if a_slice.len() % element_size != 0 {
+            return Err(PyValueError::new_err(
+                "length must be a multiple of `element_size`",
+            ));
+        }
+        let count = a_slice.len() / element_size;
+        let expected = count
+            .checked_mul(8)
+            .ok_or_else(|| PyValueError::new_err("output capacity overflows"))?;
+        if out_len != expected {
+            return Err(PyValueError::new_err("`out` must be exactly count*8 bytes"));
+        }
+
+        // Writable buffer exports are not exclusive. Keep the GIL attached
+        // while constructing and using the mutable Rust slice.
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr_addr as *mut u8, out_len) };
+        crate::bytes_pairwise_distances_into(a_slice, b_slice, element_size, out_slice)
+            .map_err(PyValueError::new_err)
     })
 }
 
@@ -960,13 +976,14 @@ fn check_bytes_arrays_all_within_dist_packed<'py>(
 #[pyfunction]
 #[pyo3(signature = (array_of_elems, elem_to_compare, max_dist, out_distances, out_indices))]
 fn check_bytes_arrays_all_within_dist_into(
-    py: Python<'_>,
+    _py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: i64,
     out_distances: &Bound<'_, PyAny>,
     out_indices: &Bound<'_, PyAny>,
 ) -> PyResult<usize> {
+    ensure_writable_into_supported()?;
     if max_dist < 0 {
         return Err(PyValueError::new_err("`max_dist` must be >=0"));
     }
@@ -976,7 +993,6 @@ fn check_bytes_arrays_all_within_dist_into(
     buf_i.as_mut().acquire_writable(out_indices)?;
     let d_len = buf_d.len();
     let i_len = buf_i.len();
-    // SAFETY: pointers captured under GIL; pinned guards outlive detached use.
     let d_ptr_addr = buf_d.as_mut().raw_mut_ptr() as usize;
     let i_ptr_addr = buf_i.as_mut().raw_mut_ptr() as usize;
     if buffer_ranges_overlap(
@@ -990,11 +1006,14 @@ fn check_bytes_arrays_all_within_dist_into(
         ));
     }
 
-    with_two_readonly_buffers(array_of_elems, elem_to_compare, |big, small, can_detach| {
-        let compute = || -> PyResult<usize> {
-            let d_ptr = d_ptr_addr as *mut u8;
-            let i_ptr = i_ptr_addr as *mut u8;
-            for (ptr, len) in [(d_ptr as *const u8, d_len), (i_ptr as *const u8, i_len)] {
+    with_two_readonly_buffers(
+        array_of_elems,
+        elem_to_compare,
+        |big, small, _can_detach| {
+            for (ptr, len) in [
+                (d_ptr_addr as *const u8, d_len),
+                (i_ptr_addr as *const u8, i_len),
+            ] {
                 if buffer_ranges_overlap(big.as_ptr(), big.len(), ptr, len)
                     || buffer_ranges_overlap(small.as_ptr(), small.len(), ptr, len)
                 {
@@ -1042,22 +1061,26 @@ fn check_bytes_arrays_all_within_dist_into(
                     "out_indices must have capacity for num_records * 4 bytes",
                 ));
             }
+
             let matches = crate::bytes_array_all_within_dist(big, small, max_dist)
                 .map_err(PyValueError::new_err)?;
-            for (k, (d, idx)) in matches.iter().enumerate() {
+            // Writable buffer exports are not exclusive. Keep the GIL attached
+            // while serializing into the caller's Python-owned buffers.
+            for (k, (distance, index)) in matches.iter().enumerate() {
                 unsafe {
-                    std::ptr::write_unaligned(d_ptr.add(k * 2) as *mut u16, (*d as u16).to_le());
-                    std::ptr::write_unaligned(i_ptr.add(k * 4) as *mut u32, (*idx as u32).to_le());
+                    std::ptr::write_unaligned(
+                        (d_ptr_addr as *mut u8).add(k * 2) as *mut u16,
+                        (*distance as u16).to_le(),
+                    );
+                    std::ptr::write_unaligned(
+                        (i_ptr_addr as *mut u8).add(k * 4) as *mut u32,
+                        (*index as u32).to_le(),
+                    );
                 }
             }
             Ok(matches.len())
-        };
-        if can_detach && big.len() >= ARRAY_GIL_RELEASE_THRESHOLD {
-            py.detach(compute)
-        } else {
-            compute()
-        }
-    })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

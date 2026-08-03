@@ -209,7 +209,11 @@ records:
 
 ``hamming_distances_bytes_into`` requires ``out`` to be a writable,
 C-contiguous byte buffer of exactly ``count * 8`` bytes; read-only,
-non-contiguous, or wrong-size outputs raise ``ValueError``.
+non-contiguous, or wrong-size outputs raise ``ValueError``. Writable ``_into``
+APIs are unavailable on free-threaded Python because the buffer protocol does
+not provide exclusive access; use the corresponding ``_packed`` API there.
+On standard Python builds, ``_into`` keeps the GIL while writing; use
+``_packed`` when detached computation is more important than buffer reuse.
 
 Multi-query catalog scans run one catalog against many contiguous queries in
 one call, mirroring the shape of repeated single-query calls:
@@ -254,7 +258,9 @@ distances and ``u32`` indices instead of Python tuples:
 The ``_packed`` variant returns two ``bytes`` objects; ``_into`` writes into
 caller-provided writable buffers and returns the match count. Element widths
 whose maximum possible distance exceeds ``u16::MAX`` bits, and catalogs with
-more than ``u32::MAX`` records, are rejected.
+more than ``u32::MAX`` records, are rejected. On free-threaded Python, use
+``_packed`` because writable ``_into`` buffers cannot be made exclusive through
+the Python buffer protocol.
 
 Benchmark
 ---------

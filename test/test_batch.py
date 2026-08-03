@@ -12,6 +12,7 @@ Covers:
 
 import array
 import random
+import sys
 
 import pytest
 from hexhamming import (
@@ -153,6 +154,17 @@ def test_pairwise_into_accepts_unaligned_memoryview():
         int.from_bytes(bytes(view[i * 8 : (i + 1) * 8]), "little") for i in range(count)
     ]
     assert parsed == dists
+
+
+def test_pairwise_into_accepts_live_writable_alias():
+    width = 16
+    count = 5
+    a = _random_bytes(width * count, 1)
+    b = _random_bytes(width * count, 2)
+    out = bytearray(count * 8)
+    alias = memoryview(out)
+    assert hamming_distances_bytes_into(a, b, width, out) == count
+    assert bytes(alias) == hamming_distances_bytes_packed(a, b, width)
 
 
 def test_pairwise_into_rejects_overlapping_input():
@@ -382,6 +394,21 @@ def test_into_all_rejects_overlapping_outputs():
         )
 
 
+def test_into_all_accepts_live_writable_aliases():
+    width = 16
+    count = 16
+    catalog = _random_bytes(width * count, 131)
+    query = catalog[:width]
+    d_out = bytearray(count * 2)
+    i_out = bytearray(count * 4)
+    d_alias = memoryview(d_out)
+    i_alias = memoryview(i_out)
+    n = check_bytes_arrays_all_within_dist_into(catalog, query, 128, d_out, i_out)
+    d_bytes, i_bytes = check_bytes_arrays_all_within_dist_packed(catalog, query, 128)
+    assert bytes(d_alias[: n * 2]) == bytes(d_bytes)
+    assert bytes(i_alias[: n * 4]) == bytes(i_bytes)
+
+
 def test_into_all_rejects_overlapping_input():
     catalog = bytearray(range(64))
     query = bytes(16)
@@ -392,6 +419,23 @@ def test_into_all_rejects_overlapping_input():
             128,
             memoryview(catalog)[:8],
             bytearray(16),
+        )
+
+
+@pytest.mark.skipif(
+    not hasattr(sys, "_is_gil_enabled") or sys._is_gil_enabled(),
+    reason="requires free-threaded Python",
+)
+def test_writable_into_apis_rejected_without_gil():
+    with pytest.raises(ValueError, match="unavailable on free-threaded Python"):
+        hamming_distances_bytes_into(b"\x00" * 16, b"\x00" * 16, 16, bytearray(8))
+    with pytest.raises(ValueError, match="unavailable on free-threaded Python"):
+        check_bytes_arrays_all_within_dist_into(
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            bytearray(2),
+            bytearray(4),
         )
 
 
