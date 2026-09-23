@@ -163,10 +163,12 @@ jobs:
 
       - name: Python tests
         # Emulation makes wall-clock assertions meaningless, so skip the one
-        # timing test along with the benchmarks.
+        # timing test along with the benchmarks, and SDE cannot follow the
+        # execve of the test that runs Python in a subprocess.
         run: >-
           sde64 -${{ matrix.cpu }} -- python -m pytest -q -p no:cacheprovider test/
-          -k "not bench and not test_check_hexstrings_within_dist_long_random_fast"
+          -k "not bench and not test_check_hexstrings_within_dist_long_random_fast
+          and not test_num_threads_environment_variable"
 
   build-and-test:
     name: Testing on ${{ matrix.os }} with Python ${{ matrix.python-version }}
