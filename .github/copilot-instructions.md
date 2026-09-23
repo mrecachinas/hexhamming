@@ -174,6 +174,11 @@ cargo fmt --check         # Rust formatting
 python3 -m pytest -vls .  # Full test suite
 ```
 
+### Updating README Benchmarks
+`python3 scripts/readme_benchmarks.py --runs 7` (optionally `--only SECTION`) prints the
+README's Python benchmark tables as reStructuredText, ready to paste. It takes ~5 minutes;
+run it on an otherwise idle machine and paste whole tables rather than editing numbers.
+
 ### CI/CD Information
 The project uses GitHub Actions with maturin for cross-platform wheel building:
 - Runs on every pull request (including stacked PRs whose base is not `main`)
