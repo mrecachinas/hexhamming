@@ -404,8 +404,9 @@ pub(crate) fn serial_all_within_dist(
     results
 }
 
-/// Experimental: hex hamming distance using pack-to-bytes approach.
-/// Parses 32 hex chars → 16 packed bytes, then uses vcntq_u8.
+/// Experimental: hex hamming distance using the older pack-to-bytes NEON
+/// kernel (32 hex chars → 16 packed bytes, then vcntq_u8). Kept as a benchmark
+/// reference; `hex_hamming_distance` uses the faster table-lookup kernel.
 #[cfg(target_arch = "aarch64")]
 pub fn hex_hamming_distance_pack(a: &str, b: &str) -> Result<u64, &'static str> {
     if a.len() != b.len() {
