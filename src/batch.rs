@@ -171,17 +171,41 @@ fn resolve_multi_scan<'a>(
     Ok((query_count, kernel, scanner))
 }
 
+/// Share of the parallel threshold that a batch of early-exit scans spends
+/// serially, in bytes actually read, before spreading the rest of its queries
+/// across threads. See [`map_queries_with`].
+const EARLY_EXIT_PREFIX_SHARE: usize = 8;
+
+/// Bytes a scan read before it stopped early, or `None` if it read every
+/// record it was given.
+type StoppedEarly<R> = fn(&R, usize) -> Option<usize>;
+
+/// `first` stops at its match.
+fn first_stopped(found: &Option<usize>, width: usize) -> Option<usize> {
+    found.map(|index| (index + 1) * width)
+}
+
+/// `best` stops at an exact match.
+fn best_stopped(best: &Option<(u64, usize)>, width: usize) -> Option<usize> {
+    match *best {
+        Some((0, index)) => Some((index + 1) * width),
+        _ => None,
+    }
+}
+
 /// Run one scan per query against `catalog`, in query order.
 ///
 /// Large batches spread whole queries across threads, each scanned serially,
 /// which parallelizes better than splitting every catalog scan. With fewer
 /// queries than threads over a catalog big enough to split on its own, each
-/// query's scan is parallelized instead.
+/// query's scan is parallelized instead. `stopped` marks scans that can stop
+/// early, whose batches first run a serial prefix.
 fn map_queries<R, S, P>(
     catalog: &[u8],
     queries: &[u8],
     query_width: usize,
     max_dist: i64,
+    stopped: Option<StoppedEarly<R>>,
     serial: S,
     parallel: P,
 ) -> Result<Vec<R>, &'static str>
@@ -192,25 +216,38 @@ where
 {
     let (_, _, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
     let threshold = crate::api::parallel_threshold(scanner.is_some());
+    let prefix = stopped.map(|stopped| (threshold / EARLY_EXIT_PREFIX_SHARE, stopped));
     map_queries_with(
         catalog,
         queries,
         query_width,
         max_dist,
         threshold,
+        prefix,
         serial,
         parallel,
     )
 }
 
 /// `map_queries` with an explicit minimum total work, in bytes scanned, for
-/// spreading queries across threads.
+/// spreading queries across threads, and an explicit serial prefix: a budget
+/// in bytes read, and how a scan's result shows it stopped early.
+///
+/// The threshold is checked against full scans, but `first` (and `best`, on
+/// an exact match) can stop far short of one, so a batch that clears it may
+/// still be cheap. The prefix answers queries serially, each within what is
+/// left of the budget, until the budget is spent or a query needs more; that
+/// query and the rest are then planned as usual. A batch that turns out cheap
+/// never wakes the pool, and one that doesn't spends at most the budget
+/// serially, including the window of the query that is scanned again.
+#[allow(clippy::too_many_arguments)]
 fn map_queries_with<R, S, P>(
     catalog: &[u8],
     queries: &[u8],
     query_width: usize,
     max_dist: i64,
     threshold: usize,
+    prefix: Option<(usize, StoppedEarly<R>)>,
     serial: S,
     parallel: P,
 ) -> Result<Vec<R>, &'static str>
@@ -229,20 +266,40 @@ where
         )
     };
     let each_query_splits = catalog.len() >= threshold;
-    if !each_query_splits || query_count >= par::threads() {
-        if let Some(plan) = par::plan_items(query_count, catalog.len(), threshold) {
+    if each_query_splits && query_count < par::threads() {
+        return Ok((0..query_count)
+            .map(|q| parallel(&scan(q), catalog))
+            .collect());
+    }
+    let mut results = Vec::with_capacity(query_count);
+    if let Some((mut budget, stopped)) = prefix {
+        while results.len() < query_count && budget >= query_width {
+            let window = catalog.len().min(budget - budget % query_width);
+            let result = serial(&scan(results.len()), &catalog[..window]);
+            let read = match stopped(&result, query_width) {
+                Some(read) => read,
+                None if window == catalog.len() => window,
+                None => break,
+            };
+            budget -= read;
+            results.push(result);
+        }
+    }
+    let done = results.len();
+    let rest = query_count - done;
+    match par::plan_items(rest, catalog.len(), threshold) {
+        Some(plan) => {
             let per_chunk = par::map_chunks(plan.chunks, |chunk| {
-                let (start, end) = plan.range(chunk, query_count);
-                (start..end)
+                let (start, end) = plan.range(chunk, rest);
+                (done + start..done + end)
                     .map(|q| serial(&scan(q), catalog))
                     .collect::<Vec<R>>()
             });
-            return Ok(per_chunk.into_iter().flatten().collect());
+            results.extend(per_chunk.into_iter().flatten());
         }
+        None => results.extend((done..query_count).map(|q| parallel(&scan(q), catalog))),
     }
-    Ok((0..query_count)
-        .map(|q| parallel(&scan(q), catalog))
-        .collect())
+    Ok(results)
 }
 
 /// Multi-query variant of [`bytes_array_first_within_dist`]:
@@ -259,6 +316,7 @@ pub fn bytes_array_first_many_within_dist(
         queries,
         query_width,
         max_dist,
+        Some(first_stopped),
         |scan, catalog| scan.first(catalog),
         |scan, catalog| scan.first_parallel(catalog),
     )
@@ -276,6 +334,7 @@ pub fn bytes_array_best_many_within_dist(
         queries,
         query_width,
         max_dist,
+        Some(best_stopped),
         |scan, catalog| scan.best(catalog),
         |scan, catalog| scan.best_parallel(catalog),
     )
@@ -293,6 +352,7 @@ pub fn bytes_array_all_many_within_dist(
         queries,
         query_width,
         max_dist,
+        None,
         |scan, catalog| scan.all(catalog),
         |scan, catalog| scan.all_parallel(catalog),
     )
@@ -406,7 +466,9 @@ mod tests {
 
     // Force the parallel-over-queries path on a small batch and compare with
     // independent per-query scans; queries copied from the catalog make exact
-    // matches (and therefore early exits) common.
+    // matches (and therefore early exits) common. Serial prefix budgets range
+    // from none, through windows that end before, inside or after the first
+    // match, to one covering the whole batch.
     #[test]
     fn many_query_split_matches_per_query_scans() {
         for &width in &[8usize, 16, 20] {
@@ -416,54 +478,70 @@ mod tests {
                 queries[q * width..(q + 1) * width]
                     .copy_from_slice(&catalog[at * width..(at + 1) * width]);
             }
-            for &max_dist in &[-1i64, 0, 4, width as i64 * 3] {
-                let first = map_queries_with(
-                    &catalog,
-                    &queries,
-                    width,
-                    max_dist,
-                    0,
-                    |s, c| s.first(c),
-                    |s, c| s.first_parallel(c),
-                )
-                .unwrap();
-                let best = map_queries_with(
-                    &catalog,
-                    &queries,
-                    width,
-                    max_dist,
-                    0,
-                    |s, c| s.best(c),
-                    |s, c| s.best_parallel(c),
-                )
-                .unwrap();
-                let all = map_queries_with(
-                    &catalog,
-                    &queries,
-                    width,
-                    max_dist,
-                    0,
-                    |s, c| s.all(c),
-                    |s, c| s.all_parallel(c),
-                )
-                .unwrap();
-                for (q, query) in queries.chunks_exact(width).enumerate() {
-                    let label = format!("width={width} max_dist={max_dist} query={q}");
-                    assert_eq!(
-                        first[q],
-                        crate::api::Scan::new(query, max_dist).first(&catalog),
-                        "first {label}"
-                    );
-                    assert_eq!(
-                        best[q],
-                        crate::api::Scan::new(query, max_dist).best(&catalog),
-                        "best {label}"
-                    );
-                    assert_eq!(
-                        all[q],
-                        crate::api::Scan::new(query, max_dist).all(&catalog),
-                        "all {label}"
-                    );
+            let budgets = [
+                None,
+                Some(0),
+                Some(3 * width),
+                Some(700 * width + 5),
+                Some(catalog.len()),
+                Some(5 * catalog.len()),
+                Some(usize::MAX / 2),
+            ];
+            for &max_dist in &[-1i64, 0, 4, width as i64 * 3, width as i64 * 8] {
+                for budget in budgets {
+                    let first = map_queries_with(
+                        &catalog,
+                        &queries,
+                        width,
+                        max_dist,
+                        0,
+                        budget.map(|b| (b, first_stopped as StoppedEarly<_>)),
+                        |s, c| s.first(c),
+                        |s, c| s.first_parallel(c),
+                    )
+                    .unwrap();
+                    let best = map_queries_with(
+                        &catalog,
+                        &queries,
+                        width,
+                        max_dist,
+                        0,
+                        budget.map(|b| (b, best_stopped as StoppedEarly<_>)),
+                        |s, c| s.best(c),
+                        |s, c| s.best_parallel(c),
+                    )
+                    .unwrap();
+                    let all = map_queries_with(
+                        &catalog,
+                        &queries,
+                        width,
+                        max_dist,
+                        0,
+                        budget.map(|b| (b, (|_, _| None) as StoppedEarly<_>)),
+                        |s, c| s.all(c),
+                        |s, c| s.all_parallel(c),
+                    )
+                    .unwrap();
+                    for (q, query) in queries.chunks_exact(width).enumerate() {
+                        let label = format!(
+                            "width={width} max_dist={max_dist} budget={budget:?} query={q}"
+                        );
+                        assert_eq!(
+                            first[q],
+                            crate::api::Scan::new(query, max_dist).first(&catalog),
+                            "first {label}"
+                        );
+                        assert_eq!(
+                            best[q],
+                            crate::api::Scan::new(query, max_dist).best(&catalog),
+                            "best {label}"
+                        );
+                        assert_eq!(
+                            all[q],
+                            crate::api::Scan::new(query, max_dist).all(&catalog),
+                            "all {label}"
+                        );
+                    }
                 }
             }
         }
