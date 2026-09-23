@@ -137,7 +137,7 @@ fn select_bytes_kernel_for_algo(algo: u8) -> BytesKernel {
         ALGO_AVX512 => {
             if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
                 hamming_distance_bytes_avx512
-            } else if is_x86_feature_detected!("avx2") {
+            } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt") {
                 hamming_distance_bytes_avx2
             } else {
                 native::hamming_distance_bytes_native
@@ -146,7 +146,7 @@ fn select_bytes_kernel_for_algo(algo: u8) -> BytesKernel {
 
         #[cfg(target_arch = "x86_64")]
         ALGO_AVX2 => {
-            if is_x86_feature_detected!("avx2") {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt") {
                 hamming_distance_bytes_avx2
             } else {
                 native::hamming_distance_bytes_native
@@ -196,7 +196,7 @@ pub(crate) fn hamming_distance_bytes_dispatch(a: &[u8], b: &[u8], max_dist: i64)
             // it. Fallbacks preserve behavior on wheels built for many CPUs.
             if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512bitalg") {
                 unsafe { x86_simd::hamming_distance_bytes_avx512(a, b, max_dist) }
-            } else if is_x86_feature_detected!("avx2") {
+            } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt") {
                 unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, max_dist) }
             } else {
                 native::hamming_distance_bytes_native(a, b, max_dist)
@@ -207,7 +207,7 @@ pub(crate) fn hamming_distance_bytes_dispatch(a: &[u8], b: &[u8], max_dist: i64)
         ALGO_AVX2 => {
             // AVX2 byte distance uses a nibble popcount shuffle table; if AVX2
             // is unavailable, native scalar popcount is the safe fallback.
-            if is_x86_feature_detected!("avx2") {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt") {
                 unsafe { x86_simd::hamming_distance_bytes_avx2(a, b, max_dist) }
             } else {
                 native::hamming_distance_bytes_native(a, b, max_dist)

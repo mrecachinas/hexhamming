@@ -92,7 +92,34 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
                 _ => None,
             };
         }
-        let _ = width;
+        if (algo == ALGO_NATIVE || algo == ALGO_AVX2)
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("popcnt")
+        {
+            return match width {
+                8 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx2_8_dispatch,
+                    best: crate::x86_simd::array_best_avx2_8_dispatch,
+                    all: crate::x86_simd::array_all_avx2_8_dispatch,
+                }),
+                16 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx2_16_dispatch,
+                    best: crate::x86_simd::array_best_avx2_16_dispatch,
+                    all: crate::x86_simd::array_all_avx2_16_dispatch,
+                }),
+                32 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx2_32_dispatch,
+                    best: crate::x86_simd::array_best_avx2_32_dispatch,
+                    all: crate::x86_simd::array_all_avx2_32_dispatch,
+                }),
+                64 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx2_64_dispatch,
+                    best: crate::x86_simd::array_best_avx2_64_dispatch,
+                    all: crate::x86_simd::array_all_avx2_64_dispatch,
+                }),
+                _ => None,
+            };
+        }
         None
     }
 
