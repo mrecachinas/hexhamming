@@ -543,6 +543,67 @@ def test_fixed_width_array_apis_randomized_oracle(width):
         assert check_bytes_arrays_all_within_dist(array, needle, max_dist) == expected
 
 
+def _planted_scan_catalog(width=16, count=200_000, at=123_456):
+    rng = random.Random(3)
+    records = bytearray(rng.randbytes(width * count))
+    query = bytes(rng.randbytes(width))
+    records[at * width : (at + 1) * width] = query
+    return bytes(records), query, at
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="needs os.fork")
+def test_parallel_scans_work_in_a_forked_child():
+    """A forked child has no copy of the parent's scan workers; it must start
+    its own pool (or scan serially) instead of waiting on them."""
+    import os
+    import signal
+    import warnings
+
+    records, query, at = _planted_scan_catalog()
+    # 3.2 MB: large enough to split, and it starts the pool in the parent.
+    assert check_bytes_arrays_first_within_dist(records, query, 0) == at
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        pid = os.fork()
+    if pid == 0:
+        signal.alarm(30)
+        ok = (
+            check_bytes_arrays_first_within_dist(records, query, 0) == at
+            and check_bytes_arrays_best_within_dist(records, query, 0) == (0, at)
+            and check_bytes_arrays_all_within_dist(records, query, 0) == [(0, at)]
+        )
+        os._exit(0 if ok else 1)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status), status
+    assert os.WEXITSTATUS(status) == 0
+
+
+@pytest.mark.parametrize("threads", ("1", "3"))
+def test_num_threads_environment_variable(threads):
+    """HEXHAMMING_NUM_THREADS sizes the scan pool; results never depend on it."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import random, hexhamming as h\n"
+        "rng = random.Random(3)\n"
+        "r = bytearray(rng.randbytes(16 * 200_000)); q = bytes(rng.randbytes(16))\n"
+        "r[123_456 * 16 : 123_457 * 16] = q\n"
+        "print(h.check_bytes_arrays_best_within_dist(bytes(r), q, 0))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "HEXHAMMING_NUM_THREADS": threads},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "(0, 123456)"
+
+
 ############################
 # Benchmarks
 #

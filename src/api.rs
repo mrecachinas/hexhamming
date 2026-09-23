@@ -11,13 +11,14 @@ use crate::par;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Scans of at least this many bytes are split across threads when each record
-/// costs a kernel call (widths without a block scanner). Measured crossover
-/// (Apple M4 Max, rayon): 1.6x at 1 MiB for 20-byte records.
-pub(crate) const PAR_THRESHOLD_BYTES: usize = 1024 * 1024;
+/// costs a kernel call (widths without a block scanner). Measured on an Apple
+/// M4 Max with the scan pool: 20-byte records are 2.0-3.5x faster at 128 KiB
+/// and ~3x at 256 KiB.
+pub(crate) const PAR_THRESHOLD_BYTES: usize = 64 * 1024;
 /// Block scanners are cheaper per byte, so they need a larger scan before
-/// waking the thread pool pays off: 0.6x at 2 MiB, 1.2-1.3x at 4 MiB and 1.8x
-/// at 8 MiB for 16- and 64-byte records.
-pub(crate) const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
+/// splitting pays off: 16- and 64-byte records are 0.8x at 256 KiB, 1.4-1.7x
+/// at 512 KiB and 2.5x at 1 MiB.
+pub(crate) const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 512 * 1024;
 /// `first` and `best` scan a serial prefix before going parallel, so early
 /// matches (and early exact matches for `best`) never pay for waking workers.
 /// It is 1/64 of the scan, clamped to 16-256 KiB, which keeps its cost on scans
@@ -239,7 +240,7 @@ impl<'a> Scan<'a> {
         let prefix_bytes = (records.len() / SERIAL_PREFIX_SHARE)
             .clamp(SERIAL_PREFIX_MIN_BYTES, SERIAL_PREFIX_MAX_BYTES);
         let prefix = (prefix_bytes / width).next_multiple_of(16).min(count);
-        par::plan(count - prefix, width, 0).map(|plan| (prefix, plan))
+        par::split(count - prefix, width, min_bytes).map(|plan| (prefix, plan))
     }
 
     /// `first_parallel` with an explicit minimum scan size for splitting.
@@ -690,7 +691,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Wave 2b: rayon parallelization regression tests
+    // Parallel scan regression tests
     // -----------------------------------------------------------------------
 
     /// Build a big array of `num_elements` chunks of size `elem_size`, all filled

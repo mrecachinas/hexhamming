@@ -72,6 +72,33 @@ jobs:
       - name: Run Rust tests
         run: cargo test --no-default-features --release
 
+  pool-sanitizers:
+    name: Thread pool under ThreadSanitizer and Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Enough workers to exercise the pool on any runner.
+      HEXHAMMING_NUM_THREADS: 4
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly
+          components: rust-src, miri
+
+      - name: ThreadSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --no-default-features 'par::'
+
+      - name: Miri
+        env:
+          # The pool's workers outlive the tests by design.
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-env-forward=HEXHAMMING_NUM_THREADS
+        run: cargo miri test --no-default-features 'par::'
+
   x86-emulated:
     name: x86 tests under Intel SDE (${{ matrix.cpu }})
     runs-on: ubuntu-latest

@@ -185,6 +185,8 @@ The project uses GitHub Actions with maturin for cross-platform wheel building:
   every x86 dispatch path runs regardless of runner hardware.
   `HEXHAMMING_EXPECT_X86_FEATURES` (checked by `tests/x86_cpu_features.rs`) fails the job if the
   emulated CPU does not report the expected features
+- `pool-sanitizers`: the scan thread pool's tests (`par::`) under ThreadSanitizer and Miri
+  with `HEXHAMMING_NUM_THREADS=4`
 - `Benchmark PR` (`benchmark.yml`): benchmarks every PR against its base branch on x86 and
   comments the comparison
 - Builds wheels for Linux (manylinux), macOS, Windows
