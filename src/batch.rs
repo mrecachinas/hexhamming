@@ -237,9 +237,12 @@ where
 /// an exact match) can stop far short of one, so a batch that clears it may
 /// still be cheap. The prefix answers queries serially, each within what is
 /// left of the budget, until the budget is spent or a query needs more; that
-/// query and the rest are then planned as usual. A batch that turns out cheap
-/// never wakes the pool, and one that doesn't spends at most the budget
-/// serially, including the window of the query that is scanned again.
+/// query and the rest are then planned as usual. Past the budget it carries
+/// on while the batch, extrapolated from the queries answered so far, would
+/// stay below the threshold, but never reads more than the threshold in all.
+/// A batch that turns out cheap never wakes the pool; one that doesn't
+/// spends at most the budget serially (the threshold if its cheap queries
+/// come first), including the window of the query that is scanned again.
 #[allow(clippy::too_many_arguments)]
 fn map_queries_with<R, S, P>(
     catalog: &[u8],
@@ -276,16 +279,25 @@ where
         // Counted in records, so the loop costs no more per query than a
         // plain serial one.
         let records = catalog.len() / query_width;
-        let mut budget = budget / query_width;
-        while results.len() < query_count && budget > 0 {
-            let window = records.min(budget);
-            let result = serial(&scan(results.len()), &catalog[..window * query_width]);
-            let read = match stopped(&result) {
-                Some(read) => read,
+        let budget = budget / query_width;
+        let limit = threshold / query_width;
+        let mut read = 0usize;
+        while results.len() < query_count {
+            let answered = results.len();
+            let cap = if read < budget {
+                budget
+            } else if read.saturating_mul(query_count) < limit.saturating_mul(answered) {
+                limit
+            } else {
+                break;
+            };
+            let window = records.min(cap - read);
+            let result = serial(&scan(answered), &catalog[..window * query_width]);
+            read += match stopped(&result) {
+                Some(stopped_after) => stopped_after,
                 None if window == records => window,
                 None => break,
             };
-            budget -= read;
             results.push(result);
         }
     }
@@ -494,14 +506,20 @@ mod tests {
                 Some(5 * catalog.len()),
                 Some(usize::MAX / 2),
             ];
+            // A zero threshold stops the prefix at its budget; four catalogs let
+            // it carry on while the batch projects below that.
+            let thresholds = [0, 4 * catalog.len()];
             for &max_dist in &[-1i64, 0, 4, width as i64 * 3, width as i64 * 8] {
-                for budget in budgets {
+                for (threshold, budget) in thresholds
+                    .iter()
+                    .flat_map(|&t| budgets.iter().map(move |&b| (t, b)))
+                {
                     let first = map_queries_with(
                         &catalog,
                         &queries,
                         width,
                         max_dist,
-                        0,
+                        threshold,
                         budget.map(|b| (b, first_stopped as StoppedEarly<_>)),
                         |s, c| s.first(c),
                         |s, c| s.first_parallel(c),
@@ -512,7 +530,7 @@ mod tests {
                         &queries,
                         width,
                         max_dist,
-                        0,
+                        threshold,
                         budget.map(|b| (b, best_stopped as StoppedEarly<_>)),
                         |s, c| s.best(c),
                         |s, c| s.best_parallel(c),
@@ -523,7 +541,7 @@ mod tests {
                         &queries,
                         width,
                         max_dist,
-                        0,
+                        threshold,
                         budget.map(|b| (b, (|_| None) as StoppedEarly<_>)),
                         |s, c| s.all(c),
                         |s, c| s.all_parallel(c),
