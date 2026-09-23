@@ -1,0 +1,162 @@
+name: PGO wheels
+
+# Profile-guided optimization for the wheels built natively on their runner:
+# build an instrumented wheel, train it with scripts/pgo_train.py, merge the
+# profile, and rebuild every wheel with it. The release workflow calls this on
+# tags. On pull requests it runs only with the `ci:wheels` label, validating
+# the build and reporting PGO vs. plain timings; nothing is published there.
+
+on:
+  workflow_call:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pgo-wheels:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:wheels')
+    name: PGO wheels (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+            interpreters: --find-interpreter
+            artifact: wheels-linux-x86_64
+          # macOS and Windows build for the runner's default Python, as the
+          # release jobs did before PGO.
+          - platform: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: ""
+            interpreters: ""
+            artifact: wheels-macos-aarch64
+          - platform: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+            interpreters: ""
+            artifact: wheels-windows
+    defaults:
+      run:
+        shell: bash
+    env:
+      PGO_DATA: ${{ github.workspace }}/pgo-data
+      PGO_PROFILE: ${{ github.workspace }}/pgo.profdata
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: llvm-tools
+
+      # llvm-profdata must match the LLVM that compiles the wheels, so the
+      # manylinux container installs this exact toolchain version too.
+      - name: Resolve toolchain and training interpreter
+        id: env
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          # The interpreter maturin uses by default. On Windows `python3` can
+          # be the Microsoft Store stub, so use `python` there.
+          if [ "$RUNNER_OS" = Windows ]; then python=$(command -v python); else python=$(command -v python3); fi
+          version=$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          "$python" -m venv "$RUNNER_TEMP/train"
+          "$python" -m venv "$RUNNER_TEMP/plain"
+          if [ "$RUNNER_OS" = Windows ]; then bin=Scripts/python.exe; else bin=bin/python; fi
+          {
+            echo "rust=$(rustc --version | cut -d' ' -f2)"
+            echo "profdata=$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-profdata"
+            echo "python-version=$version"
+            echo "abi=cp${version/./}"
+            echo "train-python=$RUNNER_TEMP/train/$bin"
+            echo "plain-python=$RUNNER_TEMP/plain/$bin"
+          } >> "$GITHUB_OUTPUT"
+          echo "Training with Python $version and $(rustc --version)"
+
+      - name: Build instrumented wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        env:
+          RUSTFLAGS: -Cprofile-generate=${{ env.PGO_DATA }}
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out instrumented --interpreter ${{ steps.env.outputs.python-version }}
+          before-script-linux: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.env.outputs.rust }}
+            source $HOME/.cargo/env
+
+      - name: Train
+        run: |
+          py="${{ steps.env.outputs.train-python }}"
+          "$py" -m pip install --quiet --force-reinstall --no-deps instrumented/*.whl
+          "$py" scripts/pgo_train.py
+
+      - name: Merge profile
+        run: '"${{ steps.env.outputs.profdata }}" merge -o "$PGO_PROFILE" "$PGO_DATA"'
+
+      - name: Build PGO wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        env:
+          # PGSO would size-optimize code the training never ran; keep it at
+          # full optimization so untrained paths do not regress.
+          RUSTFLAGS: -Cprofile-use=${{ env.PGO_PROFILE }} -Cllvm-args=-pgso=false
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist ${{ matrix.interpreters }}
+          before-script-linux: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.env.outputs.rust }}
+            source $HOME/.cargo/env
+
+      - name: Test PGO wheel
+        run: |
+          py="${{ steps.env.outputs.train-python }}"
+          wheels=(dist/*-${{ steps.env.outputs.abi }}-${{ steps.env.outputs.abi }}-*.whl)
+          "$py" -m pip install --quiet pytest
+          "$py" -m pip install --quiet --force-reinstall --no-deps "${wheels[0]}"
+          "$py" -m pytest -q -p no:cacheprovider test/ -k "not bench"
+
+      - name: Build plain wheel for comparison
+        if: github.event_name == 'pull_request'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out plain --interpreter ${{ steps.env.outputs.python-version }}
+          before-script-linux: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.env.outputs.rust }}
+            source $HOME/.cargo/env
+
+      - name: Compare PGO and plain builds
+        if: github.event_name == 'pull_request'
+        run: |
+          pgo="${{ steps.env.outputs.train-python }}"
+          plain="${{ steps.env.outputs.plain-python }}"
+          "$plain" -m pip install --quiet --force-reinstall --no-deps plain/*.whl
+          mkdir -p timings
+          for run in 1 2 3 4 5; do
+            "$plain" scripts/pgo_bench.py > "timings/plain-$run.json"
+            "$pgo" scripts/pgo_bench.py > "timings/pgo-$run.json"
+          done
+          {
+            echo "### PGO vs. plain (${{ matrix.platform }})"
+            echo
+            "$pgo" scripts/pgo_bench.py --compare timings/plain-*.json vs timings/pgo-*.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
