@@ -171,10 +171,10 @@ fn resolve_multi_scan<'a>(
     Ok((query_count, kernel, scanner))
 }
 
-/// Share of the parallel threshold that a batch of early-exit scans spends
-/// serially, in bytes actually read, before spreading the rest of its queries
-/// across threads. See [`map_queries_with`].
-const EARLY_EXIT_PREFIX_SHARE: usize = 8;
+/// Share of the parallel threshold that a batch of early-exit scans reads
+/// serially before judging, from the queries answered so far, whether the
+/// rest is worth spreading across threads. See [`map_queries_with`].
+const EARLY_EXIT_PREFIX_SHARE: usize = 32;
 
 /// Records a scan read before it stopped early, or `None` if it read every
 /// record it was given.
