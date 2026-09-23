@@ -67,18 +67,22 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
 
     #[cfg(target_arch = "x86_64")]
     {
-        // Only opt in to the AVX-512 cross-record scanners when the user
-        // hasn't explicitly requested a narrower or scalar backend, and only
-        // when the host actually supports the required feature set. This
-        // preserves observable behavior on hosts without AVX-512 BITALG and
-        // for callers that explicitly set "classic"/"sse"/"avx2".
+        // Only opt in to the AVX-512 block scanners when the user hasn't
+        // explicitly requested a narrower or scalar backend, and only when the
+        // host supports VPOPCNTDQ (every AVX-512 BITALG CPU does). Explicit
+        // "classic"/"sse"/"avx2" keep their own paths.
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
         if (algo == ALGO_NATIVE || algo == ALGO_AVX512)
             && is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("avx512vpopcntdq")
+            && is_x86_feature_detected!("popcnt")
         {
-            return match width {
+            let scanner = match width {
+                8 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx512_8_dispatch,
+                    best: crate::x86_simd::array_best_avx512_8_dispatch,
+                    all: crate::x86_simd::array_all_avx512_8_dispatch,
+                }),
                 16 => Some(ArrayScanner {
                     first: crate::x86_simd::array_first_avx512_16_dispatch,
                     best: crate::x86_simd::array_best_avx512_16_dispatch,
@@ -89,8 +93,16 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
                     best: crate::x86_simd::array_best_avx512_32_dispatch,
                     all: crate::x86_simd::array_all_avx512_32_dispatch,
                 }),
+                64 => Some(ArrayScanner {
+                    first: crate::x86_simd::array_first_avx512_64_dispatch,
+                    best: crate::x86_simd::array_best_avx512_64_dispatch,
+                    all: crate::x86_simd::array_all_avx512_64_dispatch,
+                }),
                 _ => None,
             };
+            if scanner.is_some() || algo == ALGO_AVX512 {
+                return scanner;
+            }
         }
         if (algo == ALGO_NATIVE || algo == ALGO_AVX2)
             && is_x86_feature_detected!("avx2")

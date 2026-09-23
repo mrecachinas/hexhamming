@@ -659,12 +659,110 @@ pub unsafe fn hamming_distance_string_avx512(a: &[u8], b: &[u8]) -> Result<u64, 
     Ok(difference)
 }
 
+const AVX512_HEX_TAG_LUT: [u8; 128] = {
+    let mut table = [0x80u8; 128];
+    let mut i = 0usize;
+    while i < 10 {
+        table[b'0' as usize + i] = i as u8;
+        i += 1;
+    }
+    i = 0;
+    while i < 6 {
+        table[b'A' as usize + i] = (10 + i) as u8;
+        table[b'a' as usize + i] = (10 + i) as u8;
+        i += 1;
+    }
+    table
+};
+
+#[inline]
+#[target_feature(enable = "avx512bw", enable = "avx512vbmi")]
+unsafe fn hex_parse_avx512_vbmi(chars: __m512i, lo: __m512i, hi: __m512i) -> __m512i {
+    let idx = _mm512_and_si512(chars, _mm512_set1_epi8(0x7F));
+    _mm512_permutex2var_epi8(lo, idx, hi)
+}
+
+#[target_feature(
+    enable = "avx512f",
+    enable = "avx512bw",
+    enable = "avx512vbmi",
+    enable = "avx512bitalg",
+    enable = "popcnt"
+)]
+pub unsafe fn hamming_distance_string_avx512_vbmi(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+    let length = a.len();
+    if length < 16 {
+        return hamming_distance_string_classic(a, b);
+    }
+
+    let lut_lo = _mm512_loadu_si512(AVX512_HEX_TAG_LUT.as_ptr() as *const __m512i);
+    let lut_hi = _mm512_loadu_si512(AVX512_HEX_TAG_LUT.as_ptr().add(64) as *const __m512i);
+    let tag = _mm512_set1_epi8(0x80u8 as i8);
+    let zero = _mm512_setzero_si512();
+    let mut bad = zero;
+    let mut total = zero;
+    let mut i = 0usize;
+
+    const BATCH: usize = 32;
+    while i + 64 <= length {
+        let mut acc = zero;
+        let mut n = 0usize;
+        while n < BATCH && i + 64 <= length {
+            let ac = _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i);
+            let bc = _mm512_loadu_si512(b.as_ptr().add(i) as *const __m512i);
+            let an = hex_parse_avx512_vbmi(ac, lut_lo, lut_hi);
+            let bn = hex_parse_avx512_vbmi(bc, lut_lo, lut_hi);
+            bad = _mm512_or_si512(
+                bad,
+                _mm512_or_si512(_mm512_or_si512(ac, bc), _mm512_or_si512(an, bn)),
+            );
+            acc = _mm512_add_epi8(acc, _mm512_popcnt_epi8(_mm512_xor_si512(an, bn)));
+            i += 64;
+            n += 1;
+        }
+        total = _mm512_add_epi64(total, _mm512_sad_epu8(acc, zero));
+    }
+
+    let remaining = length - i;
+    if remaining > 0 {
+        let mask = (1u64 << remaining) - 1;
+        let ac = _mm512_maskz_loadu_epi8(mask, a.as_ptr().add(i) as *const i8);
+        let bc = _mm512_maskz_loadu_epi8(mask, b.as_ptr().add(i) as *const i8);
+        let an = hex_parse_avx512_vbmi(ac, lut_lo, lut_hi);
+        let bn = hex_parse_avx512_vbmi(bc, lut_lo, lut_hi);
+        // Masked-off lanes load as NUL, which parses to the invalid tag; only
+        // the loaded lanes may flag an invalid char. (Their XOR is 0 ^ 0 of
+        // equal tags, so they add nothing to the count.)
+        bad = _mm512_or_si512(
+            bad,
+            _mm512_maskz_mov_epi8(
+                mask,
+                _mm512_or_si512(_mm512_or_si512(ac, bc), _mm512_or_si512(an, bn)),
+            ),
+        );
+        let cnt = _mm512_popcnt_epi8(_mm512_xor_si512(an, bn));
+        total = _mm512_add_epi64(total, _mm512_sad_epu8(cnt, zero));
+    }
+
+    if _mm512_movepi8_mask(_mm512_and_si512(bad, tag)) != 0 {
+        return Err("hex string contains invalid char");
+    }
+    Ok(_mm512_reduce_add_epi64(total) as u64)
+}
+
 /// AVX-512 BITALG implementation for byte arrays.
 /// XOR + VPOPCNTB for native per-byte popcount.
 #[target_feature(enable = "avx512bw", enable = "avx512bitalg", enable = "popcnt")]
 pub unsafe fn hamming_distance_bytes_avx512(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
     let length = a.len();
     let mut i = 0;
+
+    // Below 32 bytes the masked-load tail (mask synthesis, two masked loads,
+    // VPOPCNTB, VPSADBW and a horizontal reduce) costs more than at most
+    // three 64-bit POPCNTs plus a byte tail.
+    if length < 32 {
+        return hamming_distance_bytes_popcnt(a, b, max_dist);
+    }
 
     let zero = _mm512_setzero_si512();
 
@@ -1619,190 +1717,146 @@ pub(crate) unsafe fn pairwise_avx2_fixed<const WIDTH: usize>(a: &[u8], b: &[u8],
 }
 
 // -----------------------------------------------------------------------------
-// AVX-512 BITALG cross-record scanners for fixed-width catalogs (widths 16, 32).
+// AVX-512 VPOPCNTDQ block scanners for fixed-width catalogs (8/16/32/64 B).
 //
-// Modeled on the NEON `array_first_neon` / `array_best_neon` / `array_all_neon`
-// helpers in `neon_simd.rs`. The key insight: a 512-bit ZMM register can hold
-// four 16-byte records or two 32-byte records. By broadcasting the query into
-// the same register, one XOR + VPOPCNTB + VPSADBW pass yields per-record
-// Hamming distances for a whole batch. This trades the NEON pattern of four
-// independent 128-bit ops (four `hamming_distance_neon_fixed` calls) for a
-// single wider vector op per batch of four records.
+// Each block of 16 records is XORed with the broadcast query and counted per
+// 8-byte lane with VPOPCNTQ. A tree of VPERMT2D even/odd selections and adds
+// then folds those partial counts into one ZMM holding the 16 per-record
+// distances as u32 lanes in record order, so one unsigned compare yields a
+// 16-bit hit mask and blocks without hits need no scalar work. Per 16 records
+// the fold costs 1 (8 B), 5 (16 B), 13 (32 B) or 29 (64 B) shuffle/add uops
+// on top of one load+XOR and one VPOPCNTQ per 64 bytes. (VPOPCNTQ instead of
+// VPOPCNTB + VPSADBW saves one port-5 uop per 64 bytes on Intel.)
 //
-// Semantic invariants preserved from the NEON scanners:
-//   * `first` returns the lowest matching index and short-circuits on match.
-//   * `best` returns (distance, index) with the lowest distance, lowest index
-//     on ties, and short-circuits when it observes an exact match (d == 0).
+// Semantics match the other scanners:
+//   * `first` returns the lowest matching index.
+//   * `best` returns the minimum distance, the lowest index on ties, and stops
+//     at an exact match.
 //   * `all` returns matches in ascending index order.
-//   * `max_dist < 0` disables the threshold check.
-//   * The tail (records not divisible by four) uses the same fixed-width
-//     kernel — bitwise identical to the batch result for a single record.
+//   * `max_dist < 0` means unlimited.
+// Records after the last full block use scalar POPCNT.
 // -----------------------------------------------------------------------------
-
-/// Compute Hamming distance between a single 16-byte record and query using
-/// scalar POPCNT. Cheap enough for the tail path; the batch path is where the
-/// AVX-512 win comes from.
-///
-/// # Safety
-/// `record` and `query` must each be valid for 16 readable bytes.
-#[inline(always)]
-unsafe fn hamming_distance_avx512_fixed16(record: *const u8, query: *const u8) -> u64 {
-    let ra = core::ptr::read_unaligned(record as *const u64);
-    let rb = core::ptr::read_unaligned(record.add(8) as *const u64);
-    let qa = core::ptr::read_unaligned(query as *const u64);
-    let qb = core::ptr::read_unaligned(query.add(8) as *const u64);
-    (ra ^ qa).count_ones() as u64 + (rb ^ qb).count_ones() as u64
-}
-
-/// Compute Hamming distance between a single 32-byte record and query using
-/// scalar POPCNT.
-///
-/// # Safety
-/// `record` and `query` must each be valid for 32 readable bytes.
-#[inline(always)]
-unsafe fn hamming_distance_avx512_fixed32(record: *const u8, query: *const u8) -> u64 {
-    let r0 = core::ptr::read_unaligned(record as *const u64);
-    let r1 = core::ptr::read_unaligned(record.add(8) as *const u64);
-    let r2 = core::ptr::read_unaligned(record.add(16) as *const u64);
-    let r3 = core::ptr::read_unaligned(record.add(24) as *const u64);
-    let q0 = core::ptr::read_unaligned(query as *const u64);
-    let q1 = core::ptr::read_unaligned(query.add(8) as *const u64);
-    let q2 = core::ptr::read_unaligned(query.add(16) as *const u64);
-    let q3 = core::ptr::read_unaligned(query.add(24) as *const u64);
-    (r0 ^ q0).count_ones() as u64
-        + (r1 ^ q1).count_ones() as u64
-        + (r2 ^ q2).count_ones() as u64
-        + (r3 ^ q3).count_ones() as u64
-}
-
-/// Compute four Hamming distances (four 16-byte records vs one 16-byte query)
-/// in a single AVX-512 pass.
-///
-/// Pipeline:
-///   1. Broadcast the 16-byte query to all four 128-bit lanes of a ZMM.
-///   2. Load 64 bytes = four contiguous records into a ZMM.
-///   3. XOR + `_mm512_popcnt_epi8` for per-byte popcount.
-///   4. `_mm512_sad_epu8` sums each 8-byte lane; a 16-byte record spans two
-///      adjacent 8-byte SAD lanes, so pair-sum them scalar-side.
-///
-/// # Safety
-/// `records` must be valid for 64 readable bytes and `query` must be valid for
-/// 16 readable bytes. Caller must ensure the CPU supports the target features
-/// (`avx512f`, `avx512bw`, `avx512bitalg`) — the dispatcher does this via
-/// `is_x86_feature_detected!`.
-#[inline]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-unsafe fn hamming_distance_avx512_fixed4_w16(records: *const u8, query: *const u8) -> [u64; 4] {
-    let q128 = _mm_loadu_si128(query as *const __m128i);
-    let q_bcast = _mm512_broadcast_i32x4(q128);
-    let r = _mm512_loadu_si512(records as *const __m512i);
-    let xor = _mm512_xor_si512(r, q_bcast);
-    let pop = _mm512_popcnt_epi8(xor);
-    // Each of the 8 qwords in `sad` holds the sum of eight per-byte popcounts.
-    // A 16-byte record spans two adjacent qwords, so pair-sum {0,1},{2,3},…
-    let sad = _mm512_sad_epu8(pop, _mm512_setzero_si512());
-    let mut buf = [0u64; 8];
-    _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, sad);
-    [
-        buf[0] + buf[1],
-        buf[2] + buf[3],
-        buf[4] + buf[5],
-        buf[6] + buf[7],
-    ]
-}
-
-/// Compute four Hamming distances (four 32-byte records vs one 32-byte query)
-/// in two AVX-512 passes.
-///
-/// Two 512-bit loads cover 128 bytes = four 32-byte records. The 32-byte query
-/// is broadcast to both halves of a ZMM via `_mm512_broadcast_i64x4`, then each
-/// half-vector XOR + VPOPCNTB + VPSADBW reduces to two per-record distances.
-///
-/// # Safety
-/// `records` must be valid for 128 readable bytes and `query` must be valid for
-/// 32 readable bytes. Caller must ensure the CPU supports the target features.
-#[inline]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-unsafe fn hamming_distance_avx512_fixed4_w32(records: *const u8, query: *const u8) -> [u64; 4] {
-    let q256 = _mm256_loadu_si256(query as *const __m256i);
-    let q_bcast = _mm512_broadcast_i64x4(q256);
-    let zero = _mm512_setzero_si512();
-
-    let r01 = _mm512_loadu_si512(records as *const __m512i);
-    let r23 = _mm512_loadu_si512(records.add(64) as *const __m512i);
-
-    let sad01 = _mm512_sad_epu8(_mm512_popcnt_epi8(_mm512_xor_si512(r01, q_bcast)), zero);
-    let sad23 = _mm512_sad_epu8(_mm512_popcnt_epi8(_mm512_xor_si512(r23, q_bcast)), zero);
-
-    // Each 32-byte record spans four adjacent qwords in the SAD result.
-    let mut buf = [0u64; 8];
-    _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, sad01);
-    let d0 = buf[0] + buf[1] + buf[2] + buf[3];
-    let d1 = buf[4] + buf[5] + buf[6] + buf[7];
-    _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, sad23);
-    let d2 = buf[0] + buf[1] + buf[2] + buf[3];
-    let d3 = buf[4] + buf[5] + buf[6] + buf[7];
-    [d0, d1, d2, d3]
-}
 
 #[inline(always)]
 fn within_fixed_threshold(distance: u64, max_dist: i64) -> bool {
     max_dist < 0 || distance <= max_dist as u64
 }
 
-// The per-width kernel wrappers below let the generic scanners stay free of
-// const generics and `if WIDTH == …` branches, matching the specialization
-// shape of the NEON scanners while giving LLVM straight-line code for each
-// width. Function pointers are captured statically in the ArrayScanner table.
-
+/// Largest accepted distance: `max_dist`, or any distance when unlimited,
+/// capped at the record's bit count so it fits a u32 lane.
 #[inline(always)]
-unsafe fn scan_batch4_w16(records: *const u8, query: *const u8) -> [u64; 4] {
-    hamming_distance_avx512_fixed4_w16(records, query)
-}
-#[inline(always)]
-unsafe fn scan_batch4_w32(records: *const u8, query: *const u8) -> [u64; 4] {
-    hamming_distance_avx512_fixed4_w32(records, query)
+fn block_limit<const WIDTH: usize>(max_dist: i64) -> u32 {
+    let max_bits = (WIDTH * 8) as u64;
+    if max_dist < 0 {
+        max_bits as u32
+    } else {
+        (max_dist as u64).min(max_bits) as u32
+    }
 }
 
-/// Generic scanner: find the first record index whose distance to `query` is
-/// within `max_dist`. Batches of four records per AVX-512 pass; scalar tail.
+/// The even u32 lanes of `a` followed by the even u32 lanes of `b`.
+#[inline(always)]
+unsafe fn even_dwords(a: __m512i, b: __m512i) -> __m512i {
+    let idx = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+    _mm512_permutex2var_epi32(a, idx, b)
+}
+
+/// `a` and `b` hold consecutive records whose partial sums fill groups of an
+/// even number of adjacent u32 lanes. Returns `a`'s records then `b`'s with
+/// adjacent partial sums added: half the group size, same record order.
+#[inline(always)]
+unsafe fn fold_pairs(a: __m512i, b: __m512i) -> __m512i {
+    let odd = _mm512_setr_epi32(1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31);
+    _mm512_add_epi32(even_dwords(a, b), _mm512_permutex2var_epi32(a, odd, b))
+}
+
+/// Bit counts of `records ^ query` for 64 bytes, one per 8-byte lane.
+#[inline(always)]
+unsafe fn lane_counts(records: *const u8, query: __m512i) -> __m512i {
+    let x = _mm512_xor_si512(_mm512_loadu_si512(records as *const __m512i), query);
+    _mm512_popcnt_epi64(x)
+}
+
+/// The query repeated once per record slot of a ZMM.
+#[inline(always)]
+unsafe fn broadcast_query<const WIDTH: usize>(query: *const u8) -> __m512i {
+    match WIDTH {
+        8 => _mm512_set1_epi64(core::ptr::read_unaligned(query as *const i64)),
+        16 => _mm512_broadcast_i32x4(_mm_loadu_si128(query as *const __m128i)),
+        32 => _mm512_broadcast_i64x4(_mm256_loadu_si256(query as *const __m256i)),
+        64 => _mm512_loadu_si512(query as *const __m512i),
+        _ => core::hint::unreachable_unchecked(),
+    }
+}
+
+/// The 256 bytes at `records` reduced to 16 u32 lanes of per-record partial
+/// sums in record order: `WIDTH / 16` lanes per record for WIDTH >= 16.
+#[inline(always)]
+unsafe fn fold256(records: *const u8, query: __m512i) -> __m512i {
+    fold_pairs(
+        even_dwords(
+            lane_counts(records, query),
+            lane_counts(records.add(64), query),
+        ),
+        even_dwords(
+            lane_counts(records.add(128), query),
+            lane_counts(records.add(192), query),
+        ),
+    )
+}
+
+/// Distances of the 16 records at `records`, as u32 lanes in record order.
 ///
-/// # Safety
-/// `big_array.len()` must be a multiple of `WIDTH`. Caller guarantees the CPU
-/// supports the target features.
-#[inline]
-unsafe fn array_first_avx512<const WIDTH: usize>(
+/// SAFETY: `records` must be valid for `16 * WIDTH` readable bytes.
+#[inline(always)]
+unsafe fn block16_distances<const WIDTH: usize>(records: *const u8, query: __m512i) -> __m512i {
+    match WIDTH {
+        // Each 8-byte lane is one whole record.
+        8 => even_dwords(
+            lane_counts(records, query),
+            lane_counts(records.add(64), query),
+        ),
+        16 => fold256(records, query),
+        32 => fold_pairs(fold256(records, query), fold256(records.add(256), query)),
+        64 => fold_pairs(
+            fold_pairs(fold256(records, query), fold256(records.add(256), query)),
+            fold_pairs(
+                fold256(records.add(512), query),
+                fold256(records.add(768), query),
+            ),
+        ),
+        _ => core::hint::unreachable_unchecked(),
+    }
+}
+
+#[inline(always)]
+unsafe fn tail_distance<const WIDTH: usize>(record: *const u8, query: *const u8) -> u32 {
+    avx2_distance_for_width::<WIDTH>(record, query) as u32
+}
+
+#[inline(always)]
+unsafe fn scan_first_avx512<const WIDTH: usize>(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
-    batch4: unsafe fn(*const u8, *const u8) -> [u64; 4],
-    single: unsafe fn(*const u8, *const u8) -> u64,
 ) -> Option<usize> {
     let count = big_array.len() / WIDTH;
-    let big_ptr = big_array.as_ptr();
-    let query_ptr = small_array.as_ptr();
-    if count == 0 {
-        return None;
-    }
-
-    let first_distance = single(big_ptr, query_ptr);
-    if within_fixed_threshold(first_distance, max_dist) {
-        return Some(0);
-    }
-    let mut index = 1;
-
-    while index + 4 <= count {
-        let distances = batch4(big_ptr.add(index * WIDTH), query_ptr);
-        for (lane, &distance) in distances.iter().enumerate() {
-            if within_fixed_threshold(distance, max_dist) {
-                return Some(index + lane);
-            }
+    let records = big_array.as_ptr();
+    let query = small_array.as_ptr();
+    let limit = block_limit::<WIDTH>(max_dist);
+    let query_v = broadcast_query::<WIDTH>(query);
+    let limit_v = _mm512_set1_epi32(limit as i32);
+    let mut index = 0;
+    while index + 16 <= count {
+        let distances = block16_distances::<WIDTH>(records.add(index * WIDTH), query_v);
+        let hits = _mm512_cmple_epu32_mask(distances, limit_v);
+        if hits != 0 {
+            return Some(index + hits.trailing_zeros() as usize);
         }
-        index += 4;
+        index += 16;
     }
     while index < count {
-        let distance = single(big_ptr.add(index * WIDTH), query_ptr);
-        if within_fixed_threshold(distance, max_dist) {
+        if tail_distance::<WIDTH>(records.add(index * WIDTH), query) <= limit {
             return Some(index);
         }
         index += 1;
@@ -1810,220 +1864,163 @@ unsafe fn array_first_avx512<const WIDTH: usize>(
     None
 }
 
-/// Generic scanner: find (distance, index) of the record closest to `query`
-/// within `max_dist`, breaking ties by lowest index. Short-circuits on exact
-/// match (distance == 0).
-///
-/// # Safety
-/// Same as `array_first_avx512`.
-#[inline]
-unsafe fn array_best_avx512<const WIDTH: usize>(
+#[inline(always)]
+unsafe fn scan_best_avx512<const WIDTH: usize>(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
-    batch4: unsafe fn(*const u8, *const u8) -> [u64; 4],
-    single: unsafe fn(*const u8, *const u8) -> u64,
 ) -> Option<(u64, usize)> {
     let count = big_array.len() / WIDTH;
-    let big_ptr = big_array.as_ptr();
-    let query_ptr = small_array.as_ptr();
-    if count == 0 {
-        return None;
-    }
-
-    let first_distance = single(big_ptr, query_ptr);
-    let mut best = within_fixed_threshold(first_distance, max_dist).then_some((first_distance, 0));
-    if first_distance == 0 {
-        return best;
-    }
-    let mut index = 1;
-
-    while index + 4 <= count {
-        let distances = batch4(big_ptr.add(index * WIDTH), query_ptr);
-        for (lane, &distance) in distances.iter().enumerate() {
-            let candidate_index = index + lane;
-            let eligible = match best {
-                Some((best_distance, _)) => distance < best_distance,
-                None => within_fixed_threshold(distance, max_dist),
-            };
-            if !eligible {
-                continue;
-            }
-            if best.is_none() || distance < best.unwrap().0 {
-                best = Some((distance, candidate_index));
-                if distance == 0 {
-                    return best;
+    let records = big_array.as_ptr();
+    let query = small_array.as_ptr();
+    let query_v = broadcast_query::<WIDTH>(query);
+    // After each hit the limit drops to best - 1. Lanes are visited in index
+    // order, so equal distances keep the lowest index.
+    let mut limit = block_limit::<WIDTH>(max_dist);
+    let mut limit_v = _mm512_set1_epi32(limit as i32);
+    let mut best = None;
+    let mut index = 0;
+    while index + 16 <= count {
+        let distances = block16_distances::<WIDTH>(records.add(index * WIDTH), query_v);
+        let mut hits = _mm512_cmple_epu32_mask(distances, limit_v);
+        if hits != 0 {
+            let mut lanes = [0u32; 16];
+            _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, distances);
+            while hits != 0 {
+                let lane = hits.trailing_zeros() as usize;
+                hits &= hits - 1;
+                let distance = lanes[lane];
+                if distance <= limit {
+                    best = Some((distance as u64, index + lane));
+                    if distance == 0 {
+                        return best;
+                    }
+                    limit = distance - 1;
                 }
             }
+            limit_v = _mm512_set1_epi32(limit as i32);
         }
-        index += 4;
+        index += 16;
     }
-
     while index < count {
-        let distance = single(big_ptr.add(index * WIDTH), query_ptr);
-        let eligible = match best {
-            Some((best_distance, _)) => distance < best_distance,
-            None => within_fixed_threshold(distance, max_dist),
-        };
-        if eligible {
-            best = Some((distance, index));
+        let distance = tail_distance::<WIDTH>(records.add(index * WIDTH), query);
+        if distance <= limit {
+            best = Some((distance as u64, index));
             if distance == 0 {
                 return best;
             }
+            limit = distance - 1;
         }
         index += 1;
     }
     best
 }
 
-/// Generic scanner: collect all (distance, index) pairs in ascending-index
-/// order with `distance <= max_dist` (or all if `max_dist < 0`).
-///
-/// # Safety
-/// Same as `array_first_avx512`.
-#[inline]
-unsafe fn array_all_avx512<const WIDTH: usize>(
+#[inline(always)]
+unsafe fn scan_all_avx512<const WIDTH: usize>(
     big_array: &[u8],
     small_array: &[u8],
     max_dist: i64,
-    batch4: unsafe fn(*const u8, *const u8) -> [u64; 4],
-    single: unsafe fn(*const u8, *const u8) -> u64,
 ) -> Vec<(u64, usize)> {
     let count = big_array.len() / WIDTH;
-    let mut matches = Vec::new();
+    let records = big_array.as_ptr();
+    let query = small_array.as_ptr();
+    let limit = block_limit::<WIDTH>(max_dist);
+    let query_v = broadcast_query::<WIDTH>(query);
+    let limit_v = _mm512_set1_epi32(limit as i32);
+    let mut out = Vec::new();
     let mut index = 0;
-    let big_ptr = big_array.as_ptr();
-    let query_ptr = small_array.as_ptr();
-
-    while index + 4 <= count {
-        let distances = batch4(big_ptr.add(index * WIDTH), query_ptr);
-        for (lane, &distance) in distances.iter().enumerate() {
-            if within_fixed_threshold(distance, max_dist) {
-                matches.push((distance, index + lane));
+    while index + 16 <= count {
+        let distances = block16_distances::<WIDTH>(records.add(index * WIDTH), query_v);
+        let mut hits = _mm512_cmple_epu32_mask(distances, limit_v);
+        if hits != 0 {
+            let mut lanes = [0u32; 16];
+            _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, distances);
+            while hits != 0 {
+                let lane = hits.trailing_zeros() as usize;
+                hits &= hits - 1;
+                out.push((lanes[lane] as u64, index + lane));
             }
         }
-        index += 4;
+        index += 16;
     }
-
     while index < count {
-        let distance = single(big_ptr.add(index * WIDTH), query_ptr);
-        if within_fixed_threshold(distance, max_dist) {
-            matches.push((distance, index));
+        let distance = tail_distance::<WIDTH>(records.add(index * WIDTH), query);
+        if distance <= limit {
+            out.push((distance as u64, index));
         }
         index += 1;
     }
-    matches
+    out
 }
 
 // -----------------------------------------------------------------------------
 // Public (crate-visible) scanner entry points. `select_array_scanner_for_width`
-// captures these as function pointers, so the runtime feature check has already
-// happened at the point they are invoked.
+// captures these as function pointers after checking the CPU features.
 // -----------------------------------------------------------------------------
 
-/// # Safety
-/// Caller must ensure `avx512f + avx512bw + avx512bitalg` are available and
-/// that `big_array.len() % 16 == 0`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_first_avx512_16(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Option<usize> {
-    array_first_avx512::<16>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w16,
-        hamming_distance_avx512_fixed16,
-    )
+macro_rules! avx512_block_scanners {
+    ($width:literal, $first:ident, $best:ident, $all:ident) => {
+        /// # Safety
+        /// The CPU must support AVX-512 F/VPOPCNTDQ and POPCNT, `small_array`
+        /// must be one record long and `big_array` a whole number of records.
+        #[target_feature(enable = "avx512f", enable = "avx512vpopcntdq", enable = "popcnt")]
+        pub(crate) unsafe fn $first(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<usize> {
+            scan_first_avx512::<$width>(big_array, small_array, max_dist)
+        }
+
+        /// # Safety
+        /// Same as the matching `array_first_avx512_*`.
+        #[target_feature(enable = "avx512f", enable = "avx512vpopcntdq", enable = "popcnt")]
+        pub(crate) unsafe fn $best(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<(u64, usize)> {
+            scan_best_avx512::<$width>(big_array, small_array, max_dist)
+        }
+
+        /// # Safety
+        /// Same as the matching `array_first_avx512_*`.
+        #[target_feature(enable = "avx512f", enable = "avx512vpopcntdq", enable = "popcnt")]
+        pub(crate) unsafe fn $all(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Vec<(u64, usize)> {
+            scan_all_avx512::<$width>(big_array, small_array, max_dist)
+        }
+    };
 }
 
-/// # Safety
-/// Same as `array_first_avx512_16`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_best_avx512_16(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Option<(u64, usize)> {
-    array_best_avx512::<16>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w16,
-        hamming_distance_avx512_fixed16,
-    )
-}
-
-/// # Safety
-/// Same as `array_first_avx512_16`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_all_avx512_16(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Vec<(u64, usize)> {
-    array_all_avx512::<16>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w16,
-        hamming_distance_avx512_fixed16,
-    )
-}
-
-/// # Safety
-/// Caller must ensure `avx512f + avx512bw + avx512bitalg` are available and
-/// that `big_array.len() % 32 == 0`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_first_avx512_32(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Option<usize> {
-    array_first_avx512::<32>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w32,
-        hamming_distance_avx512_fixed32,
-    )
-}
-
-/// # Safety
-/// Same as `array_first_avx512_32`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_best_avx512_32(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Option<(u64, usize)> {
-    array_best_avx512::<32>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w32,
-        hamming_distance_avx512_fixed32,
-    )
-}
-
-/// # Safety
-/// Same as `array_first_avx512_32`.
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512bitalg")]
-pub(crate) unsafe fn array_all_avx512_32(
-    big_array: &[u8],
-    small_array: &[u8],
-    max_dist: i64,
-) -> Vec<(u64, usize)> {
-    array_all_avx512::<32>(
-        big_array,
-        small_array,
-        max_dist,
-        scan_batch4_w32,
-        hamming_distance_avx512_fixed32,
-    )
-}
+avx512_block_scanners!(
+    8,
+    array_first_avx512_8,
+    array_best_avx512_8,
+    array_all_avx512_8
+);
+avx512_block_scanners!(
+    16,
+    array_first_avx512_16,
+    array_best_avx512_16,
+    array_all_avx512_16
+);
+avx512_block_scanners!(
+    32,
+    array_first_avx512_32,
+    array_best_avx512_32,
+    array_all_avx512_32
+);
+avx512_block_scanners!(
+    64,
+    array_first_avx512_64,
+    array_best_avx512_64,
+    array_all_avx512_64
+);
 
 // -----------------------------------------------------------------------------
 // Feature-checked trampolines used by the `ArrayScanner` function-pointer table
@@ -2031,6 +2028,33 @@ pub(crate) unsafe fn array_all_avx512_32(
 // safe wrappers re-check the feature at every call (cheap after the first
 // invocation because `is_x86_feature_detected!` caches the result).
 // -----------------------------------------------------------------------------
+
+#[inline]
+pub(crate) fn array_first_avx512_8_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    unsafe { array_first_avx512_8(big_array, small_array, max_dist) }
+}
+
+#[inline]
+pub(crate) fn array_best_avx512_8_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    unsafe { array_best_avx512_8(big_array, small_array, max_dist) }
+}
+
+#[inline]
+pub(crate) fn array_all_avx512_8_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    unsafe { array_all_avx512_8(big_array, small_array, max_dist) }
+}
 
 #[inline]
 pub(crate) fn array_first_avx512_16_dispatch(
@@ -2086,6 +2110,33 @@ pub(crate) fn array_all_avx512_32_dispatch(
     unsafe { array_all_avx512_32(big_array, small_array, max_dist) }
 }
 
+#[inline]
+pub(crate) fn array_first_avx512_64_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    unsafe { array_first_avx512_64(big_array, small_array, max_dist) }
+}
+
+#[inline]
+pub(crate) fn array_best_avx512_64_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    unsafe { array_best_avx512_64(big_array, small_array, max_dist) }
+}
+
+#[inline]
+pub(crate) fn array_all_avx512_64_dispatch(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    unsafe { array_all_avx512_64(big_array, small_array, max_dist) }
+}
+
 /// Scalar fallback for hex string distance with max_dist.
 #[inline]
 unsafe fn hamming_distance_string_classic_with_max(
@@ -2115,6 +2166,19 @@ unsafe fn hamming_distance_string_classic_with_max(
 mod tests {
     use super::*;
 
+    #[target_feature(enable = "avx512bw", enable = "avx512bitalg", enable = "popcnt")]
+    unsafe fn hamming_distance_bytes_avx512_reference(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+        let mut difference = 0u64;
+        let max_dist_u64 = max_dist as u64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            difference += (x ^ y).count_ones() as u64;
+            if max_dist >= 0 && difference > max_dist_u64 {
+                return u64::MAX;
+            }
+        }
+        difference
+    }
+
     #[test]
     fn avx512_masked_byte_inputs_match_scalar_results() {
         if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512bitalg") {
@@ -2140,10 +2204,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn avx512_small_byte_shortcut_matches_reference() {
+        if !is_x86_feature_detected!("avx512bw") || !is_x86_feature_detected!("avx512bitalg") {
+            return;
+        }
+        for length in 0usize..40 {
+            let mut rng = SplitMix::new(0xB17E_512 ^ length as u64);
+            let a = rng.vec(length);
+            let b = rng.vec(length);
+            for max_dist in [-1i64, 0, 1, 7, 8, 31, 32, 1000] {
+                let want = unsafe { hamming_distance_bytes_avx512_reference(&a, &b, max_dist) };
+                let got = unsafe { hamming_distance_bytes_avx512(&a, &b, max_dist) };
+                assert_eq!(got, want, "len={length} max_dist={max_dist}");
+            }
+        }
+    }
+
     fn avx512_scanner_hw_available() -> bool {
         is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("avx512vpopcntdq")
+            && is_x86_feature_detected!("popcnt")
     }
 
     fn scalar_byte_distance(a: &[u8], b: &[u8]) -> u64 {
@@ -2199,51 +2280,48 @@ mod tests {
         (first, best, all)
     }
 
-    // Batch-of-four kernel produces the same per-record distances as a scalar
-    // popcount. Exercises the pair-sum reduction of adjacent SAD qwords.
+    #[target_feature(enable = "avx512f", enable = "avx512vpopcntdq")]
+    unsafe fn block16_distances_array<const WIDTH: usize>(
+        records: &[u8],
+        query: &[u8],
+    ) -> [u32; 16] {
+        let distances =
+            block16_distances::<WIDTH>(records.as_ptr(), broadcast_query::<WIDTH>(query.as_ptr()));
+        let mut lanes = [0u32; 16];
+        _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, distances);
+        lanes
+    }
+
+    // The fold tree must yield every record's distance in record order,
+    // including the extremes (exact match and bitwise complement).
     #[test]
-    fn avx512_fixed4_w16_matches_scalar() {
+    fn avx512_block16_distances_match_scalar() {
+        fn check<const WIDTH: usize>(rng: &mut SplitMix) {
+            let query = rng.vec(WIDTH);
+            let mut records = rng.vec(16 * WIDTH);
+            records[3 * WIDTH..4 * WIDTH].copy_from_slice(&query);
+            for (dst, &q) in records[9 * WIDTH..10 * WIDTH].iter_mut().zip(&query) {
+                *dst = !q;
+            }
+            let got = unsafe { block16_distances_array::<WIDTH>(&records, &query) };
+            for (i, &distance) in got.iter().enumerate() {
+                let want = scalar_byte_distance(&records[i * WIDTH..(i + 1) * WIDTH], &query);
+                assert_eq!(distance as u64, want, "width={WIDTH} record={i}");
+            }
+        }
         if !avx512_scanner_hw_available() {
             return;
         }
         let mut rng = SplitMix::new(0xC0FFEE_D15EA5E);
-        for _ in 0..8 {
-            let records = rng.vec(64);
-            let query = rng.vec(16);
-            let expected = [
-                scalar_byte_distance(&records[0..16], &query),
-                scalar_byte_distance(&records[16..32], &query),
-                scalar_byte_distance(&records[32..48], &query),
-                scalar_byte_distance(&records[48..64], &query),
-            ];
-            let actual =
-                unsafe { hamming_distance_avx512_fixed4_w16(records.as_ptr(), query.as_ptr()) };
-            assert_eq!(actual, expected);
+        for _ in 0..16 {
+            check::<8>(&mut rng);
+            check::<16>(&mut rng);
+            check::<32>(&mut rng);
+            check::<64>(&mut rng);
         }
     }
 
-    #[test]
-    fn avx512_fixed4_w32_matches_scalar() {
-        if !avx512_scanner_hw_available() {
-            return;
-        }
-        let mut rng = SplitMix::new(0xDEADBEEF_FEEDFACE);
-        for _ in 0..8 {
-            let records = rng.vec(128);
-            let query = rng.vec(32);
-            let expected = [
-                scalar_byte_distance(&records[0..32], &query),
-                scalar_byte_distance(&records[32..64], &query),
-                scalar_byte_distance(&records[64..96], &query),
-                scalar_byte_distance(&records[96..128], &query),
-            ];
-            let actual =
-                unsafe { hamming_distance_avx512_fixed4_w32(records.as_ptr(), query.as_ptr()) };
-            assert_eq!(actual, expected);
-        }
-    }
-
-    // Full-scanner semantic parity for widths 16 and 32 across a matrix of
+    // Full-scanner semantic parity for widths 8/16/32/64 across a matrix of
     // catalog sizes (including sizes not divisible by four to exercise the
     // scalar tail) and thresholds (first/best/all ordering, ties, exact match
     // short-circuit, and the `max_dist < 0` catch-all path).
@@ -2269,21 +2347,53 @@ mod tests {
             big[near * width] ^= 0xF0;
         }
 
-        for &max_dist in &[-1i64, 0, 3, 4, 5, 8, 128] {
+        let w = width as i64;
+        for &max_dist in &[
+            -1i64,
+            0,
+            3,
+            4,
+            5,
+            8,
+            128,
+            4 * w - 8,
+            4 * w,
+            8 * w - 1,
+            8 * w,
+            8 * w + 1,
+        ] {
             let (efirst, ebest, eall) = oracle_first_best_all(&big, &small, max_dist);
 
-            let (afirst, abest, aall) = if width == 16 {
-                (
-                    unsafe { array_first_avx512_16(&big, &small, max_dist) },
-                    unsafe { array_best_avx512_16(&big, &small, max_dist) },
-                    unsafe { array_all_avx512_16(&big, &small, max_dist) },
-                )
-            } else {
-                (
-                    unsafe { array_first_avx512_32(&big, &small, max_dist) },
-                    unsafe { array_best_avx512_32(&big, &small, max_dist) },
-                    unsafe { array_all_avx512_32(&big, &small, max_dist) },
-                )
+            let (afirst, abest, aall) = match width {
+                8 => unsafe {
+                    (
+                        array_first_avx512_8(&big, &small, max_dist),
+                        array_best_avx512_8(&big, &small, max_dist),
+                        array_all_avx512_8(&big, &small, max_dist),
+                    )
+                },
+                16 => unsafe {
+                    (
+                        array_first_avx512_16(&big, &small, max_dist),
+                        array_best_avx512_16(&big, &small, max_dist),
+                        array_all_avx512_16(&big, &small, max_dist),
+                    )
+                },
+                32 => unsafe {
+                    (
+                        array_first_avx512_32(&big, &small, max_dist),
+                        array_best_avx512_32(&big, &small, max_dist),
+                        array_all_avx512_32(&big, &small, max_dist),
+                    )
+                },
+                64 => unsafe {
+                    (
+                        array_first_avx512_64(&big, &small, max_dist),
+                        array_best_avx512_64(&big, &small, max_dist),
+                        array_all_avx512_64(&big, &small, max_dist),
+                    )
+                },
+                _ => unreachable!(),
             };
             assert_eq!(
                 afirst, efirst,
@@ -2319,6 +2429,22 @@ mod tests {
         }
         for &count in &[1usize, 3, 4, 5, 7, 8, 15, 33, 64, 512] {
             assert_scanners_match_oracle(32, count, 0xCAFEBABE ^ count as u64);
+        }
+    }
+
+    #[test]
+    fn avx512_scanners_w8_w64_random_oracle_various_counts() {
+        if !avx512_scanner_hw_available() {
+            return;
+        }
+        for &width in &[8usize, 64] {
+            for &count in &[1usize, 3, 15, 16, 17, 33, 70, 257] {
+                assert_scanners_match_oracle(
+                    width,
+                    count,
+                    0x5150_0000 ^ width as u64 ^ count as u64,
+                );
+            }
         }
     }
 
@@ -2447,6 +2573,115 @@ mod tests {
                     assert_eq!(got, want, "pairwise width={width} count={count} index={i}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn avx512_vbmi_hex_matches_legacy_kernel() {
+        if !(is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512bitalg")
+            && is_x86_feature_detected!("avx512vbmi"))
+        {
+            return;
+        }
+        let invalids = [b'g', b'G', b'z', b'!', b'/', b':', b'@', 0x80, 0xFF];
+        for len in 0usize..=600 {
+            let mut rng = SplitMix::new(0xA11CE ^ len as u64);
+            let mut a = vec![0u8; len];
+            let mut b = vec![0u8; len];
+            const HEX: &[u8] = b"0123456789abcdefABCDEF";
+            for i in 0..len {
+                a[i] = HEX[rng.next() as usize % HEX.len()];
+                b[i] = HEX[rng.next() as usize % HEX.len()];
+            }
+            for inject in [None, Some(len / 2), len.checked_sub(1)] {
+                let mut aa = a.clone();
+                if let Some(pos) = inject {
+                    if pos < len {
+                        aa[pos] = invalids[(len + pos) % invalids.len()];
+                    }
+                }
+                let want = unsafe { hamming_distance_string_avx512(&aa, &b) };
+                let got = unsafe { hamming_distance_string_avx512_vbmi(&aa, &b) };
+                assert_eq!(got, want, "len={len} inject={inject:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn public_api_native_dispatch_matches_oracles() {
+        let _ = crate::set_algorithm("native");
+        for &width in &[1usize, 2, 7, 8, 15, 16, 31, 32, 63, 64, 65, 128] {
+            for &count in &[0usize, 1, 2, 15, 16, 17, 31, 32, 33, 70, 257] {
+                let mut rng = SplitMix::new(0xD15A_7000 ^ width as u64 ^ ((count as u64) << 16));
+                let mut catalog = rng.vec(width * count);
+                let query = rng.vec(width);
+                if count > 2 {
+                    catalog[width..2 * width].copy_from_slice(&query);
+                }
+                let limits = [
+                    -1i64,
+                    0,
+                    1,
+                    (width * 4) as i64,
+                    (width * 8) as i64,
+                    (width * 8 + 1) as i64,
+                ];
+                for max_dist in limits {
+                    let (first, best, all) = oracle_first_best_all(&catalog, &query, max_dist);
+                    assert_eq!(
+                        crate::bytes_array_first_within_dist(&catalog, &query, max_dist).unwrap(),
+                        first,
+                        "first width={width} count={count} max={max_dist}"
+                    );
+                    assert_eq!(
+                        crate::bytes_array_best_within_dist(&catalog, &query, max_dist).unwrap(),
+                        best,
+                        "best width={width} count={count} max={max_dist}"
+                    );
+                    assert_eq!(
+                        crate::bytes_array_all_within_dist(&catalog, &query, max_dist).unwrap(),
+                        all,
+                        "all width={width} count={count} max={max_dist}"
+                    );
+                }
+
+                let a = rng.vec(width * count);
+                let b = rng.vec(width * count);
+                let pairwise = crate::bytes_pairwise_distances(&a, &b, width).unwrap();
+                let mut into = vec![0u8; count * 8];
+                assert_eq!(
+                    crate::bytes_pairwise_distances_into(&a, &b, width, &mut into).unwrap(),
+                    count
+                );
+                for i in 0..count {
+                    let want = scalar_byte_distance(
+                        &a[i * width..(i + 1) * width],
+                        &b[i * width..(i + 1) * width],
+                    );
+                    assert_eq!(
+                        pairwise[i], want,
+                        "pairwise width={width} count={count} i={i}"
+                    );
+                    assert_eq!(
+                        u64::from_le_bytes(into[i * 8..(i + 1) * 8].try_into().unwrap()),
+                        want
+                    );
+                }
+            }
+
+            for len in 0usize..=128 {
+                let mut a = String::with_capacity(len);
+                let mut b = String::with_capacity(len);
+                const HEX: &[u8] = b"0123456789abcdef";
+                for i in 0..len {
+                    a.push(HEX[i % HEX.len()] as char);
+                    b.push(HEX[(i * 7 + 3) % HEX.len()] as char);
+                }
+                let want = hamming_distance_string_classic(a.as_bytes(), b.as_bytes());
+                assert_eq!(crate::hex_hamming_distance(&a, &b), want);
+            }
+            let _ = crate::set_algorithm("native");
         }
     }
 }
