@@ -428,9 +428,8 @@ array all [100000×128, parallel]                   99,266.0
 ================================================  ===========
 
 On AArch64, LLVM's auto-vectorized native byte loop is faster than the
-hand-written NEON byte kernel for these sizes, while hexadecimal strings still
-use the packed NEON implementation. Large array workloads use four balanced
-Rayon jobs to avoid oversubscribing the memory-bound scan.
+hand-written NEON byte kernel for these sizes. Large array scans are split into
+chunks that a small built-in thread pool claims dynamically.
 
 Python API (via PyO3)
 ~~~~~~~~~~~~~~~~~~~~~
@@ -505,10 +504,12 @@ dominates (roughly 30–40 ns on this machine). For large inputs
 (1024+ chars, 16384-element arrays), computation dominates and Python overhead
 is negligible. Byte operations release the GIL at 16 KiB, while immutable
 strings use a zero-copy detached path from 4 KiB. Array wrappers release the GIL
-at 64 KiB; generic scans parallelize with Rayon at 5 MiB, while the optimized
-16/32-byte NEON scanners use a measured 16 MiB crossover. The ``first`` variant
-additionally short-circuits on the first hit, so a match near the start is much
-faster than one near the end.
+at 64 KiB. Array scans run on a built-in thread pool from 512 KiB for widths
+with a block scanner (8/16/32/64 bytes) and from 64 KiB for other widths, the
+measured crossovers on this machine. Set ``HEXHAMMING_NUM_THREADS`` to limit
+the pool (``1`` disables it). The ``first`` and ``best`` variants scan a short
+prefix serially and stop early, so a match near the start is much faster than
+one near the end.
 
 Batch APIs vs. Python for-loops
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

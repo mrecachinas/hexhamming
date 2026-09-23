@@ -33,17 +33,17 @@ const MAX_PROBE_RADIUS: usize = 4;
 // (Apple M4 Max, block scanners): a bucket probe, including verifying its
 // ~N/2^s records, costs 1.2-5.6 ns, rising with index size as probes miss
 // cache and TLB. A linear scan costs about 0.11 ns per record or 0.0133 ns
-// per byte, whichever is larger; split across threads it runs about 1.2x
-// faster at 4 MiB, 1.8x at 8 MiB and ~3x from 16 MiB. Slower linear scans
-// elsewhere only make the planner more conservative.
+// per byte, whichever is larger; split across threads it runs about 1.4x
+// faster at 512 KiB, 2.5x at 1 MiB and 4-6x from 2 MiB (modelled as up to 4x).
+// Slower linear scans elsewhere only make the planner more conservative.
 const QUERY_OVERHEAD_NS: f64 = 50.0;
 const PROBE_BASE_NS: f64 = 1.5;
 const PROBE_CACHE_MISS_NS: f64 = 4.0;
 const PROBE_MISS_SATURATION_BYTES: f64 = (128u64 << 20) as f64;
 const SCAN_NS_PER_RECORD: f64 = 0.11;
 const SCAN_NS_PER_BYTE: f64 = 0.0133;
-const PARALLEL_SPEEDUP_BYTES: f64 = (5u64 << 20) as f64;
-const MAX_PARALLEL_SPEEDUP: f64 = 3.0;
+const PARALLEL_SPEEDUP_BYTES: f64 = (400u64 << 10) as f64;
+const MAX_PARALLEL_SPEEDUP: f64 = 4.0;
 
 /// Estimated cost of scanning `n` records of `width` bytes linearly.
 fn linear_scan_ns(n: usize, width: usize) -> f64 {
