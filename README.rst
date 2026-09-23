@@ -541,10 +541,12 @@ The script records CPU features and tool versions alongside Criterion output
 and end-to-end Python benchmark JSON. Compare results only between runs from
 the same machine.
 
-The results below were measured with the AVX-512 kernels that preceded the
-current AVX-512 block scanners, and have not been repeated on AVX-512
-hardware since. Three-run medians on a Google Cloud ``c4-standard-4`` with an
-Intel Xeon Platinum 8581C (Emerald Rapids):
+On an Emerald Rapids CI runner (Intel Xeon Platinum 8573C), the AVX-512 block
+scanners are 2.5–4.8× faster than the AVX2 scanners for 16-, 32- and 64-byte
+records (the ``Benchmark PR`` comparison on #63). The table below predates
+them: it compares the earlier AVX-512 kernels with the code before them, as
+three-run medians on a Google Cloud ``c4-standard-4`` with an Intel Xeon
+Platinum 8581C (Emerald Rapids):
 
 .. list-table::
    :header-rows: 1
