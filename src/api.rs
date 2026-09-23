@@ -7,18 +7,24 @@ use crate::{
 #[cfg(target_arch = "x86_64")]
 use crate::{ALGO_AVX2, ALGO_AVX512, ALGO_SSE41};
 
-use rayon::prelude::*;
-use std::sync::atomic::Ordering;
+use crate::par;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Minimum total byte size of big_array before we use rayon parallel paths.
-pub(crate) const PAR_THRESHOLD_BYTES: usize = 5 * 1024 * 1024;
-/// The fixed-width NEON scanners make serial scans substantially cheaper, so
-/// use a larger crossover before paying Rayon scheduling and partition costs.
-pub(crate) const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 16 * 1024 * 1024;
-/// Keep byte-array scans to a small number of coarse jobs. More workers spend
-/// more time scheduling these very small per-record calculations than running
-/// them on current many-core CPUs.
-const PAR_JOBS: usize = 4;
+/// Scans of at least this many bytes are split across threads when each record
+/// costs a kernel call (widths without a block scanner). Measured crossover
+/// (Apple M4 Max, rayon): 1.6x at 1 MiB for 20-byte records.
+pub(crate) const PAR_THRESHOLD_BYTES: usize = 1024 * 1024;
+/// Block scanners are cheaper per byte, so they need a larger scan before
+/// waking the thread pool pays off: 0.6x at 2 MiB, 1.2-1.3x at 4 MiB and 1.8x
+/// at 8 MiB for 16- and 64-byte records.
+pub(crate) const FIXED_WIDTH_PAR_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
+/// `first` and `best` scan a serial prefix before going parallel, so early
+/// matches (and early exact matches for `best`) never pay for waking workers.
+/// It is 1/64 of the scan, clamped to 16-256 KiB, which keeps its cost on scans
+/// without early matches to ~1.5% of the serial time.
+const SERIAL_PREFIX_MIN_BYTES: usize = 16 * 1024;
+const SERIAL_PREFIX_MAX_BYTES: usize = 256 * 1024;
+const SERIAL_PREFIX_SHARE: usize = 64;
 
 pub(crate) type ArrayFirstScanner = fn(&[u8], &[u8], i64) -> Option<usize>;
 pub(crate) type ArrayBestScanner = fn(&[u8], &[u8], i64) -> Option<(u64, usize)>;
@@ -142,30 +148,209 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
     }
 }
 
-#[inline]
-pub(crate) fn should_parallel_array_scan(byte_len: usize, width: usize) -> bool {
-    let threshold = if select_array_scanner_for_width(width).is_some() {
-        FIXED_WIDTH_PAR_THRESHOLD_BYTES
-    } else {
-        PAR_THRESHOLD_BYTES
-    };
-    byte_len >= threshold
+/// One fixed-width scan (query, threshold and the kernels for its width),
+/// runnable serially or split across threads.
+#[derive(Clone, Copy)]
+pub(crate) struct Scan<'a> {
+    query: &'a [u8],
+    max_dist: i64,
+    kernel: BytesKernel,
+    scanner: Option<ArrayScanner>,
+}
+
+impl<'a> Scan<'a> {
+    #[inline]
+    pub(crate) fn new(query: &'a [u8], max_dist: i64) -> Self {
+        Self::with_kernels(
+            query,
+            max_dist,
+            select_bytes_kernel_for_width(query.len()),
+            select_array_scanner_for_width(query.len()),
+        )
+    }
+
+    /// Like `new`, with kernels already selected for `query.len()`.
+    #[inline]
+    pub(crate) fn with_kernels(
+        query: &'a [u8],
+        max_dist: i64,
+        kernel: BytesKernel,
+        scanner: Option<ArrayScanner>,
+    ) -> Self {
+        Self {
+            query,
+            max_dist,
+            kernel,
+            scanner,
+        }
+    }
+
+    #[inline]
+    fn width(&self) -> usize {
+        self.query.len()
+    }
+
+    /// Scan size, in bytes, from which splitting across threads pays off.
+    #[inline]
+    pub(crate) fn parallel_threshold(&self) -> usize {
+        parallel_threshold(self.scanner.is_some())
+    }
+
+    #[inline]
+    pub(crate) fn first(&self, records: &[u8]) -> Option<usize> {
+        match self.scanner {
+            Some(scanner) => (scanner.first)(records, self.query, self.max_dist),
+            None => serial_first_within_dist(records, self.query, self.max_dist, self.kernel),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn best(&self, records: &[u8]) -> Option<(u64, usize)> {
+        match self.scanner {
+            Some(scanner) => (scanner.best)(records, self.query, self.max_dist),
+            None => serial_best_within_dist(records, self.query, self.max_dist, self.kernel),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn all(&self, records: &[u8]) -> Vec<(u64, usize)> {
+        match self.scanner {
+            Some(scanner) => (scanner.all)(records, self.query, self.max_dist),
+            None => serial_all_within_dist(records, self.query, self.max_dist, self.kernel),
+        }
+    }
+
+    /// `first`, split across threads for large catalogs. A serial prefix
+    /// answers early matches without waking workers; after it, the lowest
+    /// matching chunk wins and later chunks are skipped once it is found.
+    pub(crate) fn first_parallel(&self, records: &[u8]) -> Option<usize> {
+        self.first_split(records, self.parallel_threshold())
+    }
+
+    /// Records in the serial prefix of a split scan, and the plan for the
+    /// rest; `None` when the scan should stay serial.
+    #[inline]
+    fn prefix_plan(&self, records: &[u8], min_bytes: usize) -> Option<(usize, par::Plan)> {
+        let width = self.width();
+        let count = records.len() / width;
+        if records.len() < min_bytes {
+            return None;
+        }
+        let prefix_bytes = (records.len() / SERIAL_PREFIX_SHARE)
+            .clamp(SERIAL_PREFIX_MIN_BYTES, SERIAL_PREFIX_MAX_BYTES);
+        let prefix = (prefix_bytes / width).next_multiple_of(16).min(count);
+        par::plan(count - prefix, width, 0).map(|plan| (prefix, plan))
+    }
+
+    /// `first_parallel` with an explicit minimum scan size for splitting.
+    pub(crate) fn first_split(&self, records: &[u8], min_bytes: usize) -> Option<usize> {
+        let width = self.width();
+        let count = records.len() / width;
+        let Some((prefix, plan)) = self.prefix_plan(records, min_bytes) else {
+            return self.first(records);
+        };
+        if let Some(index) = self.first(&records[..prefix * width]) {
+            return Some(index);
+        }
+        let rest = &records[prefix * width..];
+        par::find_first_chunk(plan.chunks, |chunk| {
+            let (start, end) = plan.range(chunk, count - prefix);
+            self.first(&rest[start * width..end * width])
+                .map(|index| prefix + start + index)
+        })
+    }
+
+    /// `best`, split across threads for large catalogs. A serial prefix settles
+    /// early exact matches without waking workers and otherwise tightens the
+    /// limit for the rest; there, an exact match ends the search for every
+    /// later chunk, since ties go to the lower index.
+    pub(crate) fn best_parallel(&self, records: &[u8]) -> Option<(u64, usize)> {
+        self.best_split(records, self.parallel_threshold())
+    }
+
+    /// `best_parallel` with an explicit minimum scan size for splitting.
+    pub(crate) fn best_split(&self, records: &[u8], min_bytes: usize) -> Option<(u64, usize)> {
+        let width = self.width();
+        let count = records.len() / width;
+        let Some((prefix, plan)) = self.prefix_plan(records, min_bytes) else {
+            return self.best(records);
+        };
+        let head = self.best(&records[..prefix * width]);
+        let rest_scan = match head {
+            Some((0, _)) => return head,
+            // Later records must be strictly closer to win.
+            Some((distance, _)) => Scan {
+                max_dist: distance as i64 - 1,
+                ..*self
+            },
+            None => *self,
+        };
+        let rest = &records[prefix * width..];
+        let exact_chunk = AtomicUsize::new(usize::MAX);
+        par::map_chunks(plan.chunks, |chunk| {
+            if exact_chunk.load(Ordering::Relaxed) < chunk {
+                return None;
+            }
+            let (start, end) = plan.range(chunk, count - prefix);
+            let best = rest_scan
+                .best(&rest[start * width..end * width])
+                .map(|(distance, index)| (distance, prefix + start + index));
+            if matches!(best, Some((0, _))) {
+                exact_chunk.fetch_min(chunk, Ordering::Relaxed);
+            }
+            best
+        })
+        .into_iter()
+        .fold(head, merge_best)
+    }
+
+    /// `all`, split across threads for large catalogs; chunk results are
+    /// concatenated in chunk order, so indices stay ascending.
+    pub(crate) fn all_parallel(&self, records: &[u8]) -> Vec<(u64, usize)> {
+        self.all_split(records, self.parallel_threshold())
+    }
+
+    /// `all_parallel` with an explicit minimum scan size for splitting.
+    pub(crate) fn all_split(&self, records: &[u8], min_bytes: usize) -> Vec<(u64, usize)> {
+        let width = self.width();
+        let count = records.len() / width;
+        let Some(plan) = par::plan(count, width, min_bytes) else {
+            return self.all(records);
+        };
+        let per_chunk = par::map_chunks(plan.chunks, |chunk| {
+            let (start, end) = plan.range(chunk, count);
+            let mut matches = self.all(&records[start * width..end * width]);
+            for (_, index) in &mut matches {
+                *index += start;
+            }
+            matches
+        });
+        let mut results = Vec::with_capacity(per_chunk.iter().map(Vec::len).sum());
+        for matches in per_chunk {
+            results.extend(matches);
+        }
+        results
+    }
 }
 
 #[inline]
-fn partition_element_ranges(num_elements: usize) -> [(usize, usize); PAR_JOBS] {
-    let base = num_elements / PAR_JOBS;
-    let remainder = num_elements % PAR_JOBS;
-    let mut ranges = [(0, 0); PAR_JOBS];
-    let mut start = 0;
-
-    for (job, range) in ranges.iter_mut().enumerate() {
-        let end = start + base + usize::from(job < remainder);
-        *range = (start, end);
-        start = end;
+pub(crate) fn parallel_threshold(has_block_scanner: bool) -> usize {
+    if has_block_scanner {
+        FIXED_WIDTH_PAR_THRESHOLD_BYTES
+    } else {
+        PAR_THRESHOLD_BYTES
     }
+}
 
-    ranges
+#[inline]
+fn validate_array_query(big_array: &[u8], small_array: &[u8]) -> Result<(), &'static str> {
+    if small_array.is_empty() {
+        return Err("elem_to_compare size must be >0");
+    }
+    if big_array.len() % small_array.len() != 0 {
+        return Err("array_of_elems size must be multiplier of elem_to_compare");
+    }
+    Ok(())
 }
 
 /// Calculate the bitwise hamming distance between two equal-length hex strings.
@@ -234,26 +419,8 @@ pub fn bytes_array_first_within_dist(
     small_array: &[u8],
     max_dist: i64,
 ) -> Result<Option<usize>, &'static str> {
-    if small_array.is_empty() {
-        return Err("elem_to_compare size must be >0");
-    }
-    if big_array.len() % small_array.len() != 0 {
-        return Err("array_of_elems size must be multiplier of elem_to_compare");
-    }
-    if let Some(scanner) = select_array_scanner_for_width(small_array.len()) {
-        return Ok((scanner.first)(big_array, small_array, max_dist));
-    }
-    // `first` has early-exit semantics: the serial scan returns as soon as the
-    // first match is found, which is essentially free for early/common matches.
-    // Parallelizing this requires a full non-short-circuiting scan to compute
-    // the minimum matching index, which is dramatically slower for early/mid
-    // matches and cannot beat serial for a match at index 0. Always go serial.
-    Ok(serial_first_within_dist(
-        big_array,
-        small_array,
-        max_dist,
-        select_bytes_kernel_for_width(small_array.len()),
-    ))
+    validate_array_query(big_array, small_array)?;
+    Ok(Scan::new(small_array, max_dist).first_parallel(big_array))
 }
 
 #[inline]
@@ -282,46 +449,8 @@ pub fn bytes_array_best_within_dist(
     small_array: &[u8],
     max_dist: i64,
 ) -> Result<Option<(u64, usize)>, &'static str> {
-    if small_array.is_empty() {
-        return Err("elem_to_compare size must be >0");
-    }
-    if big_array.len() % small_array.len() != 0 {
-        return Err("array_of_elems size must be multiplier of elem_to_compare");
-    }
-    let kernel = select_bytes_kernel_for_width(small_array.len());
-    let scanner = select_array_scanner_for_width(small_array.len());
-    let parallel_threshold = if scanner.is_some() {
-        FIXED_WIDTH_PAR_THRESHOLD_BYTES
-    } else {
-        PAR_THRESHOLD_BYTES
-    };
-    if big_array.len() < parallel_threshold {
-        if let Some(scanner) = scanner {
-            return Ok((scanner.best)(big_array, small_array, max_dist));
-        }
-        return Ok(serial_best_within_dist(
-            big_array,
-            small_array,
-            max_dist,
-            kernel,
-        ));
-    }
-    let elem_size = small_array.len();
-    let num_elements = big_array.len() / elem_size;
-    let ranges = partition_element_ranges(num_elements);
-
-    Ok(ranges
-        .par_iter()
-        .with_max_len(1)
-        .map(|&(start, end)| {
-            let chunk = &big_array[start * elem_size..end * elem_size];
-            let best = match scanner {
-                Some(scanner) => (scanner.best)(chunk, small_array, max_dist),
-                None => serial_best_within_dist(chunk, small_array, max_dist, kernel),
-            };
-            best.map(|(distance, index)| (distance, index + start))
-        })
-        .reduce(|| None, merge_best))
+    validate_array_query(big_array, small_array)?;
+    Ok(Scan::new(small_array, max_dist).best_parallel(big_array))
 }
 
 #[inline]
@@ -370,57 +499,8 @@ pub fn bytes_array_all_within_dist(
     small_array: &[u8],
     max_dist: i64,
 ) -> Result<Vec<(u64, usize)>, &'static str> {
-    if small_array.is_empty() {
-        return Err("elem_to_compare size must be >0");
-    }
-    if big_array.len() % small_array.len() != 0 {
-        return Err("array_of_elems size must be multiplier of elem_to_compare");
-    }
-    let kernel = select_bytes_kernel_for_width(small_array.len());
-    let scanner = select_array_scanner_for_width(small_array.len());
-    let parallel_threshold = if scanner.is_some() {
-        FIXED_WIDTH_PAR_THRESHOLD_BYTES
-    } else {
-        PAR_THRESHOLD_BYTES
-    };
-    if big_array.len() < parallel_threshold {
-        if let Some(scanner) = scanner {
-            return Ok((scanner.all)(big_array, small_array, max_dist));
-        }
-        return Ok(serial_all_within_dist(
-            big_array,
-            small_array,
-            max_dist,
-            kernel,
-        ));
-    }
-    let elem_size = small_array.len();
-    let num_elements = big_array.len() / elem_size;
-    let ranges = partition_element_ranges(num_elements);
-    let per_job: Vec<Vec<(u64, usize)>> = ranges
-        .par_iter()
-        .with_max_len(1)
-        .map(|&(start, end)| {
-            let chunk = &big_array[start * elem_size..end * elem_size];
-            let matches = match scanner {
-                Some(scanner) => (scanner.all)(chunk, small_array, max_dist),
-                None => serial_all_within_dist(chunk, small_array, max_dist, kernel),
-            };
-            matches
-                .into_iter()
-                .map(|(distance, index)| (distance, index + start))
-                .collect()
-        })
-        .collect();
-
-    // The indexed parallel iterator preserves range order, and each serial
-    // result is already ordered, so flattening preserves ascending indices.
-    let result_count = per_job.iter().map(Vec::len).sum();
-    let mut results = Vec::with_capacity(result_count);
-    for job_results in per_job {
-        results.extend(job_results);
-    }
-    Ok(results)
+    validate_array_query(big_array, small_array)?;
+    Ok(Scan::new(small_array, max_dist).all_parallel(big_array))
 }
 
 #[inline]
@@ -629,17 +709,63 @@ mod tests {
         big
     }
 
+    fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut v = state;
+                v = (v ^ (v >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                v = (v ^ (v >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((v ^ (v >> 31)) >> 56) as u8
+            })
+            .collect()
+    }
+
+    // Force splitting on small catalogs and compare with the serial scans.
+    // Exact matches are planted in several chunks (and near matches with
+    // tied distances), so the exact-match early exit and every tie-break are
+    // exercised across chunk boundaries.
     #[test]
-    fn parallel_ranges_cover_elements_once() {
-        for num_elements in [1, 3, 4, 5, 7, 8, 9, 100, 100_001] {
-            let ranges = partition_element_ranges(num_elements);
-            assert_eq!(ranges[0].0, 0);
-            assert_eq!(ranges[PAR_JOBS - 1].1, num_elements);
-            for pair in ranges.windows(2) {
-                assert_eq!(pair[0].1, pair[1].0);
+    fn split_scans_match_serial_scans() {
+        for &width in &[1usize, 8, 16, 20, 32, 64] {
+            // Past the serial prefix, so the parallel remainder always runs.
+            let past_prefix = SERIAL_PREFIX_MAX_BYTES / width + 5000;
+            for &count in &[33usize, 257, 4096, 20_000, past_prefix] {
+                let query = pseudo_random(width, 0xA0 + width as u64);
+                let mut records = pseudo_random(width * count, 0xB0 + (width * count) as u64);
+                let mut near = query.clone();
+                near[0] ^= 1;
+                // Near matches first (a tie across the prefix boundary), exact
+                // matches later, so a prefix best must be beaten or tied.
+                let prefix_end = (SERIAL_PREFIX_MIN_BYTES / width).min(count - 1);
+                for (k, &at) in [count / 5, prefix_end, count / 2, count - 1]
+                    .iter()
+                    .enumerate()
+                {
+                    let record = if k < 2 { &near } else { &query };
+                    records[at * width..(at + 1) * width].copy_from_slice(record);
+                }
+                for &max_dist in &[-1i64, 0, 1, 3, width as i64 * 4, width as i64 * 8] {
+                    let scan = Scan::new(&query, max_dist);
+                    let label = format!("width={width} count={count} max_dist={max_dist}");
+                    assert_eq!(
+                        scan.first_split(&records, 0),
+                        scan.first(&records),
+                        "first {label}"
+                    );
+                    assert_eq!(
+                        scan.best_split(&records, 0),
+                        scan.best(&records),
+                        "best {label}"
+                    );
+                    assert_eq!(
+                        scan.all_split(&records, 0),
+                        scan.all(&records),
+                        "all {label}"
+                    );
+                }
             }
-            let lengths: Vec<usize> = ranges.iter().map(|&(start, end)| end - start).collect();
-            assert!(lengths.iter().max().unwrap() - lengths.iter().min().unwrap() <= 1);
         }
     }
 

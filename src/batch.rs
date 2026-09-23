@@ -11,10 +11,8 @@
 //! * `set_algo` still controls the backend at call time; resolution happens
 //!   once per batch call.
 
-use crate::api::{
-    select_array_scanner_for_width, serial_all_within_dist, serial_best_within_dist,
-    serial_first_within_dist, should_parallel_array_scan, ArrayScanner,
-};
+use crate::api::{select_array_scanner_for_width, ArrayScanner, Scan};
+use crate::par;
 use crate::{select_bytes_kernel_for_width, BytesKernel};
 
 /// Compute Hamming distances between corresponding fixed-width records in two
@@ -173,6 +171,80 @@ fn resolve_multi_scan<'a>(
     Ok((query_count, kernel, scanner))
 }
 
+/// Run one scan per query against `catalog`, in query order.
+///
+/// Large batches spread whole queries across threads, each scanned serially,
+/// which parallelizes better than splitting every catalog scan. With fewer
+/// queries than threads over a catalog big enough to split on its own, each
+/// query's scan is parallelized instead.
+fn map_queries<R, S, P>(
+    catalog: &[u8],
+    queries: &[u8],
+    query_width: usize,
+    max_dist: i64,
+    serial: S,
+    parallel: P,
+) -> Result<Vec<R>, &'static str>
+where
+    R: Send,
+    S: Fn(&Scan<'_>, &[u8]) -> R + Sync,
+    P: Fn(&Scan<'_>, &[u8]) -> R,
+{
+    let (_, _, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
+    let threshold = crate::api::parallel_threshold(scanner.is_some());
+    map_queries_with(
+        catalog,
+        queries,
+        query_width,
+        max_dist,
+        threshold,
+        serial,
+        parallel,
+    )
+}
+
+/// `map_queries` with an explicit minimum total work, in bytes scanned, for
+/// spreading queries across threads.
+fn map_queries_with<R, S, P>(
+    catalog: &[u8],
+    queries: &[u8],
+    query_width: usize,
+    max_dist: i64,
+    threshold: usize,
+    serial: S,
+    parallel: P,
+) -> Result<Vec<R>, &'static str>
+where
+    R: Send,
+    S: Fn(&Scan<'_>, &[u8]) -> R + Sync,
+    P: Fn(&Scan<'_>, &[u8]) -> R,
+{
+    let (query_count, kernel, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
+    let scan = |q: usize| {
+        Scan::with_kernels(
+            &queries[q * query_width..(q + 1) * query_width],
+            max_dist,
+            kernel,
+            scanner,
+        )
+    };
+    let each_query_splits = catalog.len() >= threshold;
+    if !each_query_splits || query_count >= par::threads() {
+        if let Some(plan) = par::plan_items(query_count, catalog.len(), threshold) {
+            let per_chunk = par::map_chunks(plan.chunks, |chunk| {
+                let (start, end) = plan.range(chunk, query_count);
+                (start..end)
+                    .map(|q| serial(&scan(q), catalog))
+                    .collect::<Vec<R>>()
+            });
+            return Ok(per_chunk.into_iter().flatten().collect());
+        }
+    }
+    Ok((0..query_count)
+        .map(|q| parallel(&scan(q), catalog))
+        .collect())
+}
+
 /// Multi-query variant of [`bytes_array_first_within_dist`]:
 /// runs the same scan for every fixed-width slice of `queries` against the
 /// same `catalog`, returning one `Option<usize>` per query in query order.
@@ -182,18 +254,14 @@ pub fn bytes_array_first_many_within_dist(
     query_width: usize,
     max_dist: i64,
 ) -> Result<Vec<Option<usize>>, &'static str> {
-    let (query_count, kernel, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
-    let mut out = Vec::with_capacity(query_count);
-    // `first` is intentionally serial: the early-exit dominates parallel setup.
-    for q in 0..query_count {
-        let query = &queries[q * query_width..(q + 1) * query_width];
-        let result = match scanner {
-            Some(sc) => (sc.first)(catalog, query, max_dist),
-            None => serial_first_within_dist(catalog, query, max_dist, kernel),
-        };
-        out.push(result);
-    }
-    Ok(out)
+    map_queries(
+        catalog,
+        queries,
+        query_width,
+        max_dist,
+        |scan, catalog| scan.first(catalog),
+        |scan, catalog| scan.first_parallel(catalog),
+    )
 }
 
 /// Multi-query variant of [`bytes_array_best_within_dist`].
@@ -203,21 +271,14 @@ pub fn bytes_array_best_many_within_dist(
     query_width: usize,
     max_dist: i64,
 ) -> Result<Vec<Option<(u64, usize)>>, &'static str> {
-    let (query_count, kernel, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
-    let mut out = Vec::with_capacity(query_count);
-    for q in 0..query_count {
-        let query = &queries[q * query_width..(q + 1) * query_width];
-        let result = if should_parallel_array_scan(catalog.len(), query_width) {
-            crate::bytes_array_best_within_dist(catalog, query, max_dist)?
-        } else {
-            match scanner {
-                Some(sc) => (sc.best)(catalog, query, max_dist),
-                None => serial_best_within_dist(catalog, query, max_dist, kernel),
-            }
-        };
-        out.push(result);
-    }
-    Ok(out)
+    map_queries(
+        catalog,
+        queries,
+        query_width,
+        max_dist,
+        |scan, catalog| scan.best(catalog),
+        |scan, catalog| scan.best_parallel(catalog),
+    )
 }
 
 /// Multi-query variant of [`bytes_array_all_within_dist`].
@@ -227,21 +288,14 @@ pub fn bytes_array_all_many_within_dist(
     query_width: usize,
     max_dist: i64,
 ) -> Result<Vec<Vec<(u64, usize)>>, &'static str> {
-    let (query_count, kernel, scanner) = resolve_multi_scan(catalog, queries, query_width)?;
-    let mut out = Vec::with_capacity(query_count);
-    for q in 0..query_count {
-        let query = &queries[q * query_width..(q + 1) * query_width];
-        let result = if should_parallel_array_scan(catalog.len(), query_width) {
-            crate::bytes_array_all_within_dist(catalog, query, max_dist)?
-        } else {
-            match scanner {
-                Some(sc) => (sc.all)(catalog, query, max_dist),
-                None => serial_all_within_dist(catalog, query, max_dist, kernel),
-            }
-        };
-        out.push(result);
-    }
-    Ok(out)
+    map_queries(
+        catalog,
+        queries,
+        query_width,
+        max_dist,
+        |scan, catalog| scan.all(catalog),
+        |scan, catalog| scan.all_parallel(catalog),
+    )
 }
 
 /// Dense-transport variant of [`bytes_array_all_within_dist`]: returns matched
@@ -348,6 +402,71 @@ mod tests {
             .zip(b.iter())
             .map(|(&x, &y)| (x ^ y).count_ones() as u64)
             .sum()
+    }
+
+    // Force the parallel-over-queries path on a small batch and compare with
+    // independent per-query scans; queries copied from the catalog make exact
+    // matches (and therefore early exits) common.
+    #[test]
+    fn many_query_split_matches_per_query_scans() {
+        for &width in &[8usize, 16, 20] {
+            let catalog = make_records(width, 3000, 0xCA7 + width as u64);
+            let mut queries = make_records(width, 37, 0x9E7 + width as u64);
+            for (q, at) in [(0usize, 7usize), (5, 1500), (36, 2999)] {
+                queries[q * width..(q + 1) * width]
+                    .copy_from_slice(&catalog[at * width..(at + 1) * width]);
+            }
+            for &max_dist in &[-1i64, 0, 4, width as i64 * 3] {
+                let first = map_queries_with(
+                    &catalog,
+                    &queries,
+                    width,
+                    max_dist,
+                    0,
+                    |s, c| s.first(c),
+                    |s, c| s.first_parallel(c),
+                )
+                .unwrap();
+                let best = map_queries_with(
+                    &catalog,
+                    &queries,
+                    width,
+                    max_dist,
+                    0,
+                    |s, c| s.best(c),
+                    |s, c| s.best_parallel(c),
+                )
+                .unwrap();
+                let all = map_queries_with(
+                    &catalog,
+                    &queries,
+                    width,
+                    max_dist,
+                    0,
+                    |s, c| s.all(c),
+                    |s, c| s.all_parallel(c),
+                )
+                .unwrap();
+                for (q, query) in queries.chunks_exact(width).enumerate() {
+                    let label = format!("width={width} max_dist={max_dist} query={q}");
+                    assert_eq!(
+                        first[q],
+                        crate::api::Scan::new(query, max_dist).first(&catalog),
+                        "first {label}"
+                    );
+                    assert_eq!(
+                        best[q],
+                        crate::api::Scan::new(query, max_dist).best(&catalog),
+                        "best {label}"
+                    );
+                    assert_eq!(
+                        all[q],
+                        crate::api::Scan::new(query, max_dist).all(&catalog),
+                        "all {label}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
