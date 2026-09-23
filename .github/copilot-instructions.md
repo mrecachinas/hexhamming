@@ -187,6 +187,10 @@ The project uses GitHub Actions with maturin for cross-platform wheel building:
   emulated CPU does not report the expected features
 - `pool-sanitizers`: the scan thread pool's tests (`par::`) under ThreadSanitizer and Miri
   with `HEXHAMMING_NUM_THREADS=4`
+- `PGO wheels` (`pgo-wheels.yml`): profile-guided wheels for Linux x86_64, macOS arm64 and
+  Windows, trained with `scripts/pgo_train.py`. Releases call it on tags; on a pull request it
+  runs only with the `ci:wheels` label and reports PGO vs. plain timings from
+  `scripts/pgo_bench.py` in the job summary. Nothing is published from pull requests
 - `Benchmark PR` (`benchmark.yml`): benchmarks every PR against its base branch on x86 and
   comments the comparison
 - Builds wheels for Linux (manylinux), macOS, Windows

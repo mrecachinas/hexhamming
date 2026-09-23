@@ -236,6 +236,15 @@ jobs:
           name: wheels-sdist
           path: dist/*.tar.gz
 
+  # Wheels built natively on their runner (Linux x86_64, macOS arm64,
+  # Windows) are PGO builds; see pgo-wheels.yml.
+  wheels_pgo:
+    if: startsWith(github.ref, 'refs/tags')
+    needs: build-and-test
+    name: Build PGO wheels
+    uses: ./.github/workflows/pgo-wheels.yml
+
+  # Cross-built wheels cannot run the PGO training on the runner.
   wheels_linux:
     if: startsWith(github.ref, 'refs/tags')
     needs: build-and-test
@@ -244,7 +253,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        target: [x86_64, aarch64]
+        target: [aarch64]
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -281,7 +290,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        target: [x86_64, aarch64]
+        target: [x86_64]
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -289,7 +298,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          target: ${{ matrix.target == 'aarch64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          target: x86_64-apple-darwin
           args: --release --out dist
 
       - name: Upload wheels
@@ -299,30 +308,9 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
-  wheels_windows:
-    if: startsWith(github.ref, 'refs/tags')
-    needs: build-and-test
-    name: Build Windows wheels
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          args: --release --out dist
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: wheels-windows
-          path: dist/*.whl
-          if-no-files-found: error
-
   publish-wheels:
     if: startsWith(github.ref, 'refs/tags')
-    needs: [sdist, wheels_linux, wheels_macos, wheels_windows]
+    needs: [sdist, wheels_pgo, wheels_linux, wheels_macos]
     name: Publish wheels
     runs-on: ubuntu-latest
     environment: pypi
