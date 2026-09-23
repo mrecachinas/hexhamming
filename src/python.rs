@@ -47,6 +47,22 @@ struct SimpleByteBuffer {
     _pin: PhantomPinned,
 }
 
+/// Whether `obj` exposes the buffer protocol at all, to pick an error message
+/// after a buffer request failed. Probes with the loosest read-only request
+/// rather than `PyObject_CheckBuffer`, which PyO3 does not expose on PyPy.
+fn supports_buffer_protocol(obj: *mut ffi::PyObject) -> bool {
+    let mut view = std::mem::MaybeUninit::<ffi::Py_buffer>::uninit();
+    unsafe {
+        if ffi::PyObject_GetBuffer(obj, view.as_mut_ptr(), ffi::PyBUF_FULL_RO) == 0 {
+            ffi::PyBuffer_Release(view.as_mut_ptr());
+            true
+        } else {
+            ffi::PyErr_Clear();
+            false
+        }
+    }
+}
+
 impl SimpleByteBuffer {
     fn new() -> Self {
         Self {
@@ -78,7 +94,7 @@ impl SimpleByteBuffer {
         let result = unsafe { ffi::PyObject_GetBuffer(obj.as_ptr(), &mut this.raw, flags) };
         if result != 0 {
             let _ = PyErr::fetch(obj.py());
-            let supports_buffer = unsafe { ffi::PyObject_CheckBuffer(obj.as_ptr()) } != 0;
+            let supports_buffer = supports_buffer_protocol(obj.as_ptr());
             let message = if writable {
                 if supports_buffer {
                     "output must be a writable, C-contiguous buffer"

@@ -1,5 +1,5 @@
 import random
-from platform import machine
+from platform import machine, python_implementation
 
 import pytest
 from hexhamming import (
@@ -826,6 +826,10 @@ def test_check_hexstrings_within_dist_long_random_correctness():
         assert check_hexstrings_within_dist(a, b, 0) is (full_dist == 0)
 
 
+@pytest.mark.skipif(
+    python_implementation() == "PyPy",
+    reason="PyPy's C-extension calls alone take about as long as this threshold",
+)
 def test_check_hexstrings_within_dist_long_random_fast():
     """1024-char random strings with tight max_dist: must be fast (<0.15 us)."""
     import secrets
