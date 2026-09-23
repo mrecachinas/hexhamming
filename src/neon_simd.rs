@@ -454,8 +454,227 @@ pub unsafe fn hamming_distance_string_neon_pack(a: &[u8], b: &[u8]) -> Result<u6
     Ok(difference)
 }
 
+/// Tag carried by every parsed hex digit. XOR of two valid digits cancels it,
+/// so the XOR's popcount is exactly the per-char distance.
+const HEX_TAG: u8 = 0x10;
+
+/// `vqtbl4q_u8` table indexed by `char - b'0'`: `HEX_TAG | nibble` for hex
+/// digits and 0 for everything else. Chars below '0' wrap to indices >= 0xD0
+/// and chars from 'p' up index past 63; `vqtbl4q_u8` returns 0 for both, so
+/// every non-hex byte parses to a value below `HEX_TAG`.
+static HEX_TAGGED: [u8; 64] = {
+    let mut table = [0u8; 64];
+    let mut i = 0;
+    while i < 10 {
+        table[i] = HEX_TAG | i as u8;
+        i += 1;
+    }
+    let mut j = 0;
+    while j < 6 {
+        table[(b'A' - b'0') as usize + j] = HEX_TAG | (10 + j as u8);
+        table[(b'a' - b'0') as usize + j] = HEX_TAG | (10 + j as u8);
+        j += 1;
+    }
+    table
+};
+
+/// Loaded at byte offset `n` (1..=15), selects the last `n` lanes.
+static LAST_LANES: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+];
+
+#[inline(always)]
+unsafe fn hex_parse_tagged(chars: uint8x16_t, table: uint8x16x4_t) -> uint8x16_t {
+    vqtbl4q_u8(table, vsubq_u8(chars, vdupq_n_u8(b'0')))
+}
+
+/// Parse 32 chars of each input. Returns per-lane distance counts (two chars
+/// per lane, at most 8 when both inputs are valid) and the lane-wise minimum
+/// parsed value; a minimum below `HEX_TAG` means an invalid char.
+///
+/// SAFETY: `a` and `b` must each be valid for 32 readable bytes.
+#[inline(always)]
+unsafe fn tagged_block32(
+    a: *const u8,
+    b: *const u8,
+    table: uint8x16x4_t,
+) -> (uint8x16_t, uint8x16_t) {
+    let a_lo = hex_parse_tagged(vld1q_u8(a), table);
+    let b_lo = hex_parse_tagged(vld1q_u8(b), table);
+    let a_hi = hex_parse_tagged(vld1q_u8(a.add(16)), table);
+    let b_hi = hex_parse_tagged(vld1q_u8(b.add(16)), table);
+    let min = vminq_u8(vminq_u8(a_lo, b_lo), vminq_u8(a_hi, b_hi));
+    let count = vaddq_u8(
+        vcntq_u8(veorq_u8(a_lo, b_lo)),
+        vcntq_u8(veorq_u8(a_hi, b_hi)),
+    );
+    (count, min)
+}
+
+/// Hex-string hamming distance using a tagged table parse.
+///
+/// One `vqtbl4q_u8` per 16 chars replaces the arithmetic parse, the XOR is
+/// counted unpacked, validation is deferred to a single check of the running
+/// lane-wise minimum, and the final partial chunk re-reads the last 16 chars
+/// with the already-counted lanes masked off. Returns the same `Ok`/`Err`
+/// results as `hamming_distance_string_classic` for every input.
+#[inline]
+pub unsafe fn hamming_distance_string_neon_lut(a: &[u8], b: &[u8]) -> Result<u64, &'static str> {
+    let length = a.len();
+    if length < 16 {
+        return hamming_distance_string_classic(a, b);
+    }
+
+    let table = vld1q_u8_x4(HEX_TAGGED.as_ptr());
+    let zero = vdupq_n_u8(0);
+    let mut min = vdupq_n_u8(0xFF);
+    let mut difference: u64 = 0;
+    let mut i = 0usize;
+
+    // A lane gains at most 5 per chunk (tag bit plus nibble when one side is
+    // invalid), so 32 chunks cannot overflow a u8 lane.
+    const BATCH: usize = 32;
+    while i + 16 * BATCH <= length {
+        let mut acc = zero;
+        for _ in 0..BATCH {
+            let pa = hex_parse_tagged(vld1q_u8(a.as_ptr().add(i)), table);
+            let pb = hex_parse_tagged(vld1q_u8(b.as_ptr().add(i)), table);
+            min = vminq_u8(min, vminq_u8(pa, pb));
+            acc = vaddq_u8(acc, vcntq_u8(veorq_u8(pa, pb)));
+            i += 16;
+        }
+        difference += vaddlvq_u8(acc) as u64;
+    }
+
+    // Fewer than BATCH chunks remain, plus at most one partial chunk.
+    let mut acc = zero;
+    while i + 16 <= length {
+        let pa = hex_parse_tagged(vld1q_u8(a.as_ptr().add(i)), table);
+        let pb = hex_parse_tagged(vld1q_u8(b.as_ptr().add(i)), table);
+        min = vminq_u8(min, vminq_u8(pa, pb));
+        acc = vaddq_u8(acc, vcntq_u8(veorq_u8(pa, pb)));
+        i += 16;
+    }
+    if i < length {
+        // length >= 16, so the last 16 chars are in bounds; only the final
+        // `length - i` lanes are new.
+        let pa = hex_parse_tagged(vld1q_u8(a.as_ptr().add(length - 16)), table);
+        let pb = hex_parse_tagged(vld1q_u8(b.as_ptr().add(length - 16)), table);
+        min = vminq_u8(min, vminq_u8(pa, pb));
+        let fresh = vld1q_u8(LAST_LANES.as_ptr().add(length - i));
+        acc = vaddq_u8(acc, vcntq_u8(vandq_u8(veorq_u8(pa, pb), fresh)));
+    }
+    difference += vaddlvq_u8(acc) as u64;
+
+    if vminvq_u8(min) < HEX_TAG {
+        return Err("hex string contains invalid char");
+    }
+    Ok(difference)
+}
+
+/// Tagged-table variant of `hamming_distance_string_neon_pack_with_max`.
+///
+/// Keeps that kernel's block structure and check points exactly (eager
+/// 32-char blocks for tight thresholds, then batches of 31 blocks, then one
+/// 16-char chunk and a scalar tail). Both parses accept exactly the hex
+/// digits, and at every check point invalid input is tested before the
+/// threshold, so results match it for every input — including which of
+/// "invalid char" and "over max_dist" is reported first.
+/// Returns Ok(u64::MAX) when distance exceeds max_dist.
+#[inline]
+pub unsafe fn hamming_distance_string_neon_lut_with_max(
+    a: &[u8],
+    b: &[u8],
+    max_dist: u64,
+) -> Result<u64, &'static str> {
+    let length = a.len();
+
+    if length < 32 {
+        return hamming_distance_string_neon_with_max(a, b, max_dist);
+    }
+
+    let table = vld1q_u8_x4(HEX_TAGGED.as_ptr());
+    let zero = vdupq_n_u8(0);
+    let mut min = vdupq_n_u8(0xFF);
+    let mut i = 0usize;
+    let mut difference: u64 = 0;
+
+    let eager_blocks = if max_dist < 256 {
+        (max_dist as usize / 64) + 1
+    } else {
+        0
+    };
+    let mut eager = 0;
+    while eager < eager_blocks && i + 32 <= length {
+        let (count, block_min) = tagged_block32(a.as_ptr().add(i), b.as_ptr().add(i), table);
+        min = vminq_u8(min, block_min);
+        if vminvq_u8(min) < HEX_TAG {
+            return Err("hex string contains invalid char");
+        }
+        difference += vaddlvq_u8(count) as u64;
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+        i += 32;
+        eager += 1;
+    }
+
+    // 31 blocks of valid input add at most 31 * 8 = 248 per lane. Invalid
+    // input can overflow a lane, but then the validity check below returns
+    // before the sum is used.
+    const BATCH: usize = 31;
+    while i + 32 <= length {
+        let mut acc = zero;
+        let mut n = 0;
+        while n < BATCH && i + 32 <= length {
+            let (count, block_min) = tagged_block32(a.as_ptr().add(i), b.as_ptr().add(i), table);
+            min = vminq_u8(min, block_min);
+            acc = vaddq_u8(acc, count);
+            i += 32;
+            n += 1;
+        }
+        if vminvq_u8(min) < HEX_TAG {
+            return Err("hex string contains invalid char");
+        }
+        difference += vaddlvq_u8(acc) as u64;
+        if difference > max_dist {
+            return Ok(u64::MAX);
+        }
+    }
+
+    if i + 16 <= length {
+        let pa = hex_parse_tagged(vld1q_u8(a.as_ptr().add(i)), table);
+        let pb = hex_parse_tagged(vld1q_u8(b.as_ptr().add(i)), table);
+        if vminvq_u8(vminq_u8(pa, pb)) < HEX_TAG {
+            return Err("hex string contains invalid char");
+        }
+        difference += vaddlvq_u8(vcntq_u8(veorq_u8(pa, pb))) as u64;
+        i += 16;
+    }
+
+    while i < length {
+        let val1 = hex_char_to_nibble(*a.get_unchecked(i));
+        let val2 = hex_char_to_nibble(*b.get_unchecked(i));
+        if (val1 | val2) & 0xF0 != 0 {
+            return Err("hex string contains invalid char");
+        }
+        difference += *LOOKUP.get_unchecked((val1 ^ val2) as usize) as u64;
+        i += 1;
+    }
+
+    if difference > max_dist {
+        Ok(u64::MAX)
+    } else {
+        Ok(difference)
+    }
+}
+
 /// Like hamming_distance_string_neon_pack, but with early-exit at max_dist.
 /// Returns Ok(u64::MAX) when distance exceeds max_dist (caller treats as "not within").
+/// Superseded by `hamming_distance_string_neon_lut_with_max`; kept as the
+/// reference its tests compare against.
+#[cfg(test)]
 #[inline]
 pub unsafe fn hamming_distance_string_neon_pack_with_max(
     a: &[u8],
@@ -655,6 +874,183 @@ unsafe fn hamming_distance_string_neon_with_max(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut v = state;
+                v = (v ^ (v >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                v = (v ^ (v >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((v ^ (v >> 31)) >> 56) as u8
+            })
+            .collect()
+    }
+
+    fn random_hex(len: usize, seed: u64) -> Vec<u8> {
+        const DIGITS: &[u8] = b"0123456789abcdefABCDEF";
+        pseudo_random(len, seed)
+            .into_iter()
+            .map(|r| DIGITS[r as usize % DIGITS.len()])
+            .collect()
+    }
+
+    /// Non-hex bytes on both sides of every range boundary of the parse.
+    const INVALID: &[u8] = &[
+        0x00, b' ', b'/', b':', b'@', b'G', b'`', b'g', b'o', b'p', b'z', 0x7F, 0x80, 0xB0, 0xC1,
+        0xE6, 0xFF,
+    ];
+
+    #[test]
+    fn lut_matches_classic_on_valid_input() {
+        let mut lengths: Vec<usize> = (0..=300).collect();
+        lengths.extend([511, 512, 513, 527, 528, 529, 1024, 4095, 4096, 4097]);
+        for &len in &lengths {
+            for seed in 0..3u64 {
+                let a = random_hex(len, 2 * seed + 1);
+                let b = random_hex(len, 2 * seed + 2 + len as u64);
+                let expected = hamming_distance_string_classic(&a, &b);
+                assert_eq!(
+                    unsafe { hamming_distance_string_neon_lut(&a, &b) },
+                    expected,
+                    "len={len}"
+                );
+            }
+        }
+        // All-'f' vs all-'0' puts the maximum count in every accumulator lane.
+        for len in [16, 17, 511, 512, 513, 4096] {
+            let a = vec![b'f'; len];
+            let b = vec![b'0'; len];
+            assert_eq!(
+                unsafe { hamming_distance_string_neon_lut(&a, &b) },
+                Ok(4 * len as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn lut_rejects_invalid_char_anywhere() {
+        let expected = hamming_distance_string_classic(b"g", b"0");
+        assert!(expected.is_err());
+        let check = |len: usize, pos: usize, bad: u8| {
+            for side in 0..2 {
+                let mut a = random_hex(len, len as u64);
+                let mut b = random_hex(len, len as u64 + 7919);
+                if side == 0 {
+                    a[pos] = bad;
+                } else {
+                    b[pos] = bad;
+                }
+                assert_eq!(
+                    unsafe { hamming_distance_string_neon_lut(&a, &b) },
+                    expected,
+                    "len={len} pos={pos} byte={bad:#04x} side={side}"
+                );
+            }
+        };
+        for len in 1..=80 {
+            for pos in 0..len {
+                for &bad in INVALID {
+                    check(len, pos, bad);
+                }
+            }
+        }
+        for len in [511, 512, 513, 530, 1040] {
+            for pos in [
+                0,
+                15,
+                16,
+                255,
+                256,
+                496,
+                511,
+                512,
+                len - 17,
+                len - 16,
+                len - 1,
+            ] {
+                if pos < len {
+                    for &bad in INVALID {
+                        check(len, pos, bad);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lut_with_max_matches_pack_with_max() {
+        // Randomized lengths, thresholds, near/far pairs and invalid bytes at
+        // random positions: every result, including which of "invalid" and
+        // "over max_dist" wins, must match the pack kernel.
+        let mut state = 0xC0FFEEu64;
+        let mut next = move |bound: usize| -> usize {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut v = state;
+            v = (v ^ (v >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            v = (v ^ (v >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((v ^ (v >> 31)) % bound as u64) as usize
+        };
+        let (mut invalid_despite_crossing, mut crossing_despite_invalid) = (0, 0);
+        let (mut over, mut within) = (0, 0);
+        for trial in 0..6000u64 {
+            let len = 32 + next(1100);
+            let mut a = random_hex(len, trial * 3 + 1);
+            let mut b = if trial % 2 == 0 {
+                let mut near = a.clone();
+                for _ in 0..next(len / 2 + 1) {
+                    let pos = next(len);
+                    near[pos] = b"0123456789abcdef"[next(16)];
+                }
+                near
+            } else {
+                random_hex(len, trial * 3 + 2)
+            };
+            for _ in 0..next(3) {
+                let target = if next(2) == 0 { &mut a } else { &mut b };
+                target[next(len)] = INVALID[next(INVALID.len())];
+            }
+            let max_dist = match next(4) {
+                0 => next(64) as u64,
+                1 => next(4 * len + 2) as u64,
+                2 => [0, 63, 64, 127, 128, 255, 256, 257][next(8)],
+                _ => u64::MAX,
+            };
+            let expected = unsafe { hamming_distance_string_neon_pack_with_max(&a, &b, max_dist) };
+            let got = unsafe { hamming_distance_string_neon_lut_with_max(&a, &b, max_dist) };
+            assert_eq!(got, expected, "trial={trial} len={len} max_dist={max_dist}");
+
+            // Classify against a per-char scan so the generator provably hits
+            // the cases where block structure decides precedence.
+            let first_bad = (0..len)
+                .find(|&i| (hex_char_to_nibble(a[i]) | hex_char_to_nibble(b[i])) & 0xF0 != 0);
+            let prefix: u64 = (0..first_bad.unwrap_or(len))
+                .map(|i| (hex_char_to_nibble(a[i]) ^ hex_char_to_nibble(b[i])).count_ones() as u64)
+                .sum();
+            match (got, first_bad) {
+                (Err(_), Some(_)) if prefix > max_dist => invalid_despite_crossing += 1,
+                (Ok(u64::MAX), Some(_)) => crossing_despite_invalid += 1,
+                (Ok(u64::MAX), None) => over += 1,
+                (Ok(_), None) => within += 1,
+                _ => {}
+            }
+        }
+        assert!(invalid_despite_crossing > 50, "{invalid_despite_crossing}");
+        assert!(crossing_despite_invalid > 50, "{crossing_despite_invalid}");
+        assert!(over > 50 && within > 50, "over={over} within={within}");
+    }
+
+    #[test]
+    fn lut_with_max_unlimited_equals_full_distance() {
+        for len in [32, 33, 48, 63, 64, 65, 991, 992, 993, 2048] {
+            let a = random_hex(len, 11);
+            let b = random_hex(len, 12);
+            let full = unsafe { hamming_distance_string_neon_lut(&a, &b) };
+            let with_max = unsafe { hamming_distance_string_neon_lut_with_max(&a, &b, u64::MAX) };
+            assert_eq!(full, with_max, "len={len}");
+        }
+    }
 
     #[test]
     fn neon_string_basic() {

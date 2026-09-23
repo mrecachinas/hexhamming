@@ -269,10 +269,10 @@ pub(crate) fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64
     #[cfg(target_arch = "aarch64")]
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
-        // NEON packs pairs of hex nibbles into bytes before using vector
-        // popcount, avoiding per-character scalar work on longer strings.
+        // NEON parses 16 hex chars per table lookup and counts the nibble XOR
+        // directly, validating once per call.
         if algo == ALGO_NEON || algo == ALGO_NATIVE {
-            return unsafe { neon_simd::hamming_distance_string_neon_pack(a, b) };
+            return unsafe { neon_simd::hamming_distance_string_neon_lut(a, b) };
         }
     }
 
@@ -320,9 +320,7 @@ pub(crate) fn hamming_distance_string_dispatch_with_max(
     {
         let algo = CURRENT_ALGO.load(Ordering::Relaxed);
         if algo == ALGO_NEON || algo == ALGO_NATIVE {
-            return unsafe {
-                neon_simd::hamming_distance_string_neon_pack_with_max(a, b, max_dist)
-            };
+            return unsafe { neon_simd::hamming_distance_string_neon_lut_with_max(a, b, max_dist) };
         }
     }
 
