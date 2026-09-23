@@ -238,6 +238,61 @@ Semantics match the single-query calls exactly: ``-1`` and ``(-1, -1)``
 sentinels for no-match, lowest-index tie-breaking for ``best_many``, exact-match
 short-circuiting, and ascending index order for ``all_many``.
 
+Catalog
+~~~~~~~
+
+If you query the same fixed-width byte catalog repeatedly, ``Catalog`` copies
+and validates the records once and can optionally build a Multi-Index Hashing
+(MIH) index for small-radius lookups:
+
+::
+
+    >>> import hexhamming
+    >>> records = b"\xaa\xaa\xbb\xbb\xcc\xcc\xdd\xdd\xee\xee\xff\xff"
+    >>> cat = hexhamming.Catalog(records, 2, index=True)
+    >>> len(cat), cat.width, cat.has_index
+    (6, 2, True)
+    >>> cat.first_within(b"\xff\xff", 4)
+    1
+    >>> cat.best_within(b"\xef\xfe", 4)
+    (2, 4)
+    >>> cat.all_within(b"\xff\xff", 4)
+    [(4, 1), (4, 3), (4, 4), (0, 5)]
+
+``Catalog(..., index=False)`` uses the same linear scanners as the free
+functions while avoiding repeated catalog buffer acquisition. ``index=True`` is
+best for large, mostly static catalogs queried repeatedly at small Hamming
+radii, such as near-duplicate lookups on 64- or 256-bit perceptual hashes. For
+each query the catalog estimates whether probing the index or scanning
+linearly is faster and uses the cheaper one. Widths that cannot be indexed
+within the memory cap always scan. Either way the results, including
+tie-breaking, are identical to the free functions.
+
+Measured on an Apple M4 Max with 1M records, ``best_within`` for one query:
+
+======  ======  =============  ===========  ========
+width   radius  free function  indexed      speedup
+======  ======  =============  ===========  ========
+8 B     2       114 µs         82 ns        1392x
+8 B     8       114 µs         1.3 µs       88x
+8 B     12      108 µs         56 µs        1.9x
+32 B    8       178 µs         144 ns       1237x
+32 B    32      177 µs         5.8 µs       31x
+======  ======  =============  ===========  ========
+
+Building the index took 24 ms for the 8-byte catalog and 91 ms for the
+32-byte one.
+
+The MIH index uses flat CSR substring tables, not hash maps. For ``N`` records
+and ``m`` substring tables, memory overhead is approximately::
+
+    sum_j 4 * ((2 ** s_j + 1) + N) bytes
+
+where ``s_j`` is the bit width of substring ``j``. The planner chooses
+``s_j`` near ``ceil(log2(N)) + 2`` and caps it at 22 bits; this keeps small
+catalogs from allocating oversized tables and bounds million-record 256-bit
+catalog overhead much lower than an uncapped 24-bit plan.
+
 Dense/compact match transport for ``all_within_dist`` uses ``u16``
 distances and ``u32`` indices instead of Python tuples:
 

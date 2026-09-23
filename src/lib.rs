@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 // onto the same dispatch functions used by Rust callers.
 mod api;
 mod batch;
+mod catalog;
 mod classic;
 mod hex;
 mod native;
@@ -45,6 +46,7 @@ pub use batch::{
     bytes_array_all_within_dist_packed, bytes_array_best_many_within_dist,
     bytes_array_first_many_within_dist, bytes_pairwise_distances, bytes_pairwise_distances_into,
 };
+pub use catalog::Catalog;
 
 /// Lookup table for popcount of 4-bit values (0-15).
 /// Hex string distance is computed one nibble at a time, so this avoids a

@@ -183,6 +183,211 @@ impl Drop for SimpleByteBuffer {
     }
 }
 
+fn copy_byte_buffer(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Some(slice) = exact_bytes(obj) {
+        return Ok(slice.to_vec());
+    }
+    let mut buf = std::pin::pin!(SimpleByteBuffer::new());
+    buf.as_mut().acquire(obj)?;
+    Ok(unsafe { buf.as_ref().as_slice() }.to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// Catalog — owned fixed-width records with optional MIH index
+// ---------------------------------------------------------------------------
+
+/// Reusable fixed-width byte catalog.
+///
+/// Construct with `Catalog(records, width, index=False)`. Records are copied
+/// into Rust-owned storage, so query methods can release the GIL safely.
+#[pyclass(frozen, module = "hexhamming", name = "Catalog")]
+struct PyCatalog {
+    inner: crate::Catalog,
+}
+
+/// Estimated work below which `Catalog` calls keep the GIL attached: roughly a
+/// linear scan of `ARRAY_GIL_RELEASE_THRESHOLD` bytes, where the free
+/// functions start detaching. Indexed lookups usually cost well under this,
+/// and a detach/attach round trip would be a noticeable share of them.
+const CATALOG_DETACH_NS: f64 = 1_000.0;
+
+/// Borrow exact `bytes` (immutable and kept alive by the caller) or copy any
+/// other buffer, so either can be read with the GIL released.
+fn catalog_query<'a>(obj: &'a Bound<'_, PyAny>) -> PyResult<std::borrow::Cow<'a, [u8]>> {
+    match exact_bytes(obj) {
+        Some(slice) => Ok(std::borrow::Cow::Borrowed(slice)),
+        None => copy_byte_buffer(obj).map(std::borrow::Cow::Owned),
+    }
+}
+
+fn catalog_max_dist(max_dist: i64) -> PyResult<i64> {
+    if max_dist < 0 {
+        return Err(PyValueError::new_err("`max_dist` must be >=0"));
+    }
+    Ok(max_dist)
+}
+
+impl PyCatalog {
+    /// Run `f` detached from the interpreter only when `queries` queries at
+    /// `max_dist` are expected to cost more than a GIL round trip is worth.
+    fn run<R: Send>(
+        &self,
+        py: Python<'_>,
+        max_dist: i64,
+        queries: usize,
+        f: impl FnOnce() -> R + Send,
+    ) -> R {
+        if self.inner.estimated_query_ns(max_dist) * queries as f64 >= CATALOG_DETACH_NS {
+            py.detach(f)
+        } else {
+            f()
+        }
+    }
+
+    fn query_count(&self, queries: &[u8]) -> usize {
+        queries.len() / self.inner.width().max(1)
+    }
+}
+
+#[pymethods]
+impl PyCatalog {
+    #[new]
+    #[pyo3(signature = (records, width, index=false))]
+    fn new(records: &Bound<'_, PyAny>, width: usize, index: bool) -> PyResult<Self> {
+        let records = copy_byte_buffer(records)?;
+        let inner = if index {
+            crate::Catalog::with_index(&records, width)
+        } else {
+            crate::Catalog::new(&records, width)
+        }
+        .map_err(PyValueError::new_err)?;
+        Ok(Self { inner })
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[getter]
+    fn width(&self) -> usize {
+        self.inner.width()
+    }
+
+    #[getter]
+    fn has_index(&self) -> bool {
+        self.inner.has_index()
+    }
+
+    #[pyo3(signature = (query, max_dist))]
+    fn first_within(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<i64> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let query = catalog_query(query)?;
+        self.run(py, max_dist, 1, || {
+            self.inner.first_within(&query, max_dist)
+        })
+        .map(|match_index| match_index.map(|i| i as i64).unwrap_or(-1))
+        .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (query, max_dist))]
+    fn best_within(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<(i64, i64)> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let query = catalog_query(query)?;
+        self.run(py, max_dist, 1, || self.inner.best_within(&query, max_dist))
+            .map(|best| best.map(|(d, i)| (d as i64, i as i64)).unwrap_or((-1, -1)))
+            .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (query, max_dist))]
+    fn all_within(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<Vec<(u64, u64)>> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let query = catalog_query(query)?;
+        self.run(py, max_dist, 1, || self.inner.all_within(&query, max_dist))
+            .map(|matches| matches.into_iter().map(|(d, i)| (d, i as u64)).collect())
+            .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (queries, max_dist))]
+    fn first_many_within(
+        &self,
+        py: Python<'_>,
+        queries: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<Vec<i64>> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let queries = catalog_query(queries)?;
+        let count = self.query_count(&queries);
+        self.run(py, max_dist, count, || {
+            self.inner.first_many_within(&queries, max_dist)
+        })
+        .map(|matches| {
+            matches
+                .into_iter()
+                .map(|match_index| match_index.map(|i| i as i64).unwrap_or(-1))
+                .collect()
+        })
+        .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (queries, max_dist))]
+    fn best_many_within(
+        &self,
+        py: Python<'_>,
+        queries: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<Vec<(i64, i64)>> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let queries = catalog_query(queries)?;
+        let count = self.query_count(&queries);
+        self.run(py, max_dist, count, || {
+            self.inner.best_many_within(&queries, max_dist)
+        })
+        .map(|matches| {
+            matches
+                .into_iter()
+                .map(|best| best.map(|(d, i)| (d as i64, i as i64)).unwrap_or((-1, -1)))
+                .collect()
+        })
+        .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (queries, max_dist))]
+    fn all_many_within(
+        &self,
+        py: Python<'_>,
+        queries: &Bound<'_, PyAny>,
+        max_dist: i64,
+    ) -> PyResult<Vec<Vec<(u64, u64)>>> {
+        let max_dist = catalog_max_dist(max_dist)?;
+        let queries = catalog_query(queries)?;
+        let count = self.query_count(&queries);
+        self.run(py, max_dist, count, || {
+            self.inner.all_many_within(&queries, max_dist)
+        })
+        .map(|many| {
+            many.into_iter()
+                .map(|matches| matches.into_iter().map(|(d, i)| (d, i as u64)).collect())
+                .collect()
+        })
+        .map_err(PyValueError::new_err)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §10 + §14: hamming_distance_string — direct typed params
 // ---------------------------------------------------------------------------
@@ -1170,6 +1375,7 @@ fn set_algo(_module: &Bound<'_, PyModule>, algo_name: &str) -> PyResult<String> 
 #[pymodule]
 fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "3.0.0")?;
+    m.add_class::<PyCatalog>()?;
     m.add_function(wrap_pyfunction!(hamming_distance_string, m)?)?;
     m.add_function(wrap_pyfunction!(hamming_distance_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(check_hexstrings_within_dist, m)?)?;
