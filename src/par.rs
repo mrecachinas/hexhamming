@@ -7,11 +7,15 @@
 //!
 //! The executor is a small persistent pool rather than a general work-stealing
 //! scheduler. Idle workers spin for a moment before parking, so back-to-back
-//! scans start in about 3 us instead of the 15-40 us it took to wake rayon's
-//! workers. A job lives on the caller's stack and the caller works on it too,
-//! so it never waits for a parked worker: it only waits for workers that have
-//! joined the job. The pool runs one job at a time; concurrent or nested
-//! callers run their chunks inline. A forked child gets a fresh pool.
+//! scans start in 0.5-3 us (more chunks bring in more workers) instead of the
+//! 15-40 us it took to wake rayon's workers. A job only draws in as many
+//! workers as it has chunks for, and each worker flags that it has joined on
+//! its own cache line, so starting and finishing a job involves no contended
+//! read-modify-writes beyond claiming chunks. A job lives on the caller's
+//! stack and the caller works on it too, so it never waits for a parked
+//! worker: it only waits for workers that have joined the job. The pool runs
+//! one job at a time; concurrent or nested callers run their chunks inline. A
+//! forked child gets a fresh pool.
 
 use std::any::Any;
 use std::mem::MaybeUninit;
@@ -56,17 +60,16 @@ fn configured_threads() -> usize {
 // Pool
 // ---------------------------------------------------------------------------
 
-/// A job published to the workers. It lives on the caller's stack for the
-/// whole of `Pool::run`.
 /// Keeps a hot atomic on its own cache line (128 bytes covers Apple and
 /// x86 prefetch pairs).
 #[repr(align(128))]
 struct Padded<T>(T);
 
+/// A job published to the workers. It lives on the caller's stack for the
+/// whole of `Pool::run`.
 struct Job {
     chunks: usize,
     next: Padded<AtomicUsize>,
-    completed: Padded<AtomicUsize>,
     stop: AtomicBool,
     task: *const (dyn Fn(usize) + Sync),
     panic: Mutex<Option<Box<dyn Any + Send>>>,
@@ -76,13 +79,9 @@ impl Job {
     /// Claim and run chunks until none are left. After a panic the remaining
     /// chunks are claimed without running, so the job still completes.
     fn work(&self) {
-        let mut done = 0;
         loop {
             let chunk = self.next.0.fetch_add(1, Ordering::Relaxed);
             if chunk >= self.chunks {
-                if done > 0 {
-                    self.completed.0.fetch_add(done, Ordering::Release);
-                }
                 return;
             }
             if !self.stop.load(Ordering::Relaxed) {
@@ -94,19 +93,24 @@ impl Job {
                     slot.get_or_insert(payload);
                 }
             }
-            done += 1;
         }
     }
 }
 
 struct Pool {
+    /// Workers that started; they are numbered from 1.
     workers: AtomicUsize,
     pid: u32,
     busy: AtomicBool,
     generation: AtomicU64,
     job: AtomicPtr<Job>,
-    /// Workers that may be reading `job`.
-    users: AtomicUsize,
+    /// Workers numbered above this sit the current job out, so a job with a
+    /// few chunks does not pull every worker's cache traffic into it.
+    helpers: AtomicUsize,
+    /// Per worker, by number (slot 0, the caller's, stays clear): set while
+    /// the worker may be reading `job`. Separate lines keep joining and
+    /// leaving a job free of contended read-modify-writes.
+    active: Box<[Padded<AtomicBool>]>,
     parked: AtomicUsize,
     wake: Mutex<u64>,
     wake_cv: Condvar,
@@ -120,7 +124,10 @@ impl Pool {
             busy: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             job: AtomicPtr::new(ptr::null_mut()),
-            users: AtomicUsize::new(0),
+            helpers: AtomicUsize::new(0),
+            active: (0..threads)
+                .map(|_| Padded(AtomicBool::new(false)))
+                .collect(),
             parked: AtomicUsize::new(0),
             wake: Mutex::new(0),
             wake_cv: Condvar::new(),
@@ -128,7 +135,7 @@ impl Pool {
         for id in 1..threads {
             let spawned = std::thread::Builder::new()
                 .name(format!("hexhamming-{id}"))
-                .spawn(move || pool.worker());
+                .spawn(move || pool.worker(id));
             if spawned.is_err() {
                 break;
             }
@@ -137,18 +144,22 @@ impl Pool {
         pool
     }
 
-    fn worker(&'static self) {
+    fn worker(&'static self, id: usize) {
+        let active = &self.active[id].0;
         let mut seen = self.generation.load(Ordering::Acquire);
         loop {
             seen = self.wait_for_job(seen);
-            self.users.fetch_add(1, Ordering::SeqCst);
+            if id > self.helpers.load(Ordering::Relaxed) {
+                continue;
+            }
+            active.store(true, Ordering::SeqCst);
             let job = self.job.load(Ordering::SeqCst);
             if !job.is_null() {
                 // SAFETY: the caller keeps the job alive until it has cleared
-                // `job` and seen `users` drop to zero.
+                // `job` and seen every worker's `active` clear.
                 unsafe { (*job).work() };
             }
-            self.users.fetch_sub(1, Ordering::SeqCst);
+            active.store(false, Ordering::Release);
         }
     }
 
@@ -194,11 +205,14 @@ impl Pool {
         let job = Job {
             chunks,
             next: Padded(AtomicUsize::new(0)),
-            completed: Padded(AtomicUsize::new(0)),
             stop: AtomicBool::new(false),
             task,
             panic: Mutex::new(None),
         };
+        let helpers = chunks
+            .saturating_sub(1)
+            .min(self.workers.load(Ordering::Relaxed));
+        self.helpers.store(helpers, Ordering::Relaxed);
         self.job
             .store(&job as *const Job as *mut Job, Ordering::SeqCst);
         let generation = self.generation.fetch_add(1, Ordering::Release) + 1;
@@ -212,19 +226,22 @@ impl Pool {
             }
         }
 
+        // Every chunk is claimed once this returns; each claimed by a worker
+        // is done once that worker's `active` is clear. A worker that has not
+        // set `active` by the time it is read here sees `job` cleared (both
+        // sides are SeqCst), so it never touches the job.
         job.work();
-        let mut spins = 0u32;
-        while job.completed.0.load(Ordering::Acquire) < chunks {
-            spins = spins.wrapping_add(1);
-            if spins % 1024 == 0 {
-                std::thread::yield_now();
-            } else {
-                std::hint::spin_loop();
-            }
-        }
         self.job.store(ptr::null_mut(), Ordering::SeqCst);
-        while self.users.load(Ordering::SeqCst) != 0 {
-            std::hint::spin_loop();
+        for slot in self.active.iter() {
+            let mut spins = 0u32;
+            while slot.0.load(Ordering::SeqCst) {
+                spins = spins.wrapping_add(1);
+                if spins % 1024 == 0 {
+                    std::thread::yield_now();
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
         }
         self.busy.store(false, Ordering::Release);
 
@@ -497,6 +514,23 @@ mod tests {
             if round % 500 == 499 || (cfg!(miri) && round % 4 == 3) {
                 std::thread::sleep(SPIN * 3);
             }
+        }
+    }
+
+    #[test]
+    fn every_chunk_runs_once_as_job_sizes_change() {
+        // Jobs of a few chunks leave most workers out; the next, larger job
+        // must draw them back in even if they saw a stale helper count.
+        let rounds = if cfg!(miri) { 16 } else { 3000 };
+        for round in 0..rounds {
+            let chunks = [2, 64, 3, 17, 2, 2, 40, 5][round % 8];
+            let runs: Vec<AtomicUsize> = (0..chunks).map(|_| AtomicUsize::new(0)).collect();
+            let out = map_chunks(chunks, |c| {
+                runs[c].fetch_add(1, Ordering::Relaxed);
+                c * 3
+            });
+            assert_eq!(out, (0..chunks).map(|c| c * 3).collect::<Vec<_>>());
+            assert!(runs.iter().all(|r| r.load(Ordering::Relaxed) == 1));
         }
     }
 
