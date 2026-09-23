@@ -250,6 +250,9 @@ pub(crate) fn hamming_distance_string_dispatch(a: &[u8], b: &[u8]) -> Result<u64
             && is_x86_feature_detected!("avx512bitalg")
             && is_x86_feature_detected!("popcnt")
         {
+            if is_x86_feature_detected!("avx512vbmi") {
+                return unsafe { x86_simd::hamming_distance_string_avx512_vbmi(a, b) };
+            }
             return unsafe { x86_simd::hamming_distance_string_avx512(a, b) };
         }
         if (algo == ALGO_AVX512 || algo == ALGO_AVX2 || algo == ALGO_NATIVE)
