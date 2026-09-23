@@ -394,7 +394,7 @@ def test_check_bytes_arrays_all_within_dist_calculation(
         assert expected == check_bytes_arrays_all_within_dist(bytes1, bytes2, max_dist)
 
 
-@pytest.mark.parametrize("width", (16, 32))
+@pytest.mark.parametrize("width", (8, 16, 32, 64))
 def test_fixed_width_array_apis_randomized_oracle(width):
     rng = random.Random(0x51_0000 + width)
     count = 37
@@ -407,7 +407,7 @@ def test_fixed_width_array_apis_randomized_oracle(width):
     records[12] = bytes(near)
     array = b"".join(records)
 
-    for max_dist in (0, 3, 4, 5, 8):
+    for max_dist in (0, 3, 4, 5, 8, width * 8 - 1, width * 8, width * 8 + 1):
         distances = [
             (int.from_bytes(record, "big") ^ int.from_bytes(needle, "big")).bit_count()
             for record in records

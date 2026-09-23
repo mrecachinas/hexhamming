@@ -41,15 +41,25 @@ pub(crate) fn select_array_scanner_for_width(width: usize) -> Option<ArrayScanne
         }
 
         return match width {
+            8 => Some(ArrayScanner {
+                first: crate::neon_block::array_first_8,
+                best: crate::neon_block::array_best_8,
+                all: crate::neon_block::array_all_8,
+            }),
             16 => Some(ArrayScanner {
-                first: crate::neon_simd::array_first_neon_16,
-                best: crate::neon_simd::array_best_neon_16,
-                all: crate::neon_simd::array_all_neon_16,
+                first: crate::neon_block::array_first_16,
+                best: crate::neon_block::array_best_16,
+                all: crate::neon_block::array_all_16,
             }),
             32 => Some(ArrayScanner {
-                first: crate::neon_simd::array_first_neon_32,
-                best: crate::neon_simd::array_best_neon_32,
-                all: crate::neon_simd::array_all_neon_32,
+                first: crate::neon_block::array_first_32,
+                best: crate::neon_block::array_best_32,
+                all: crate::neon_block::array_all_32,
+            }),
+            64 => Some(ArrayScanner {
+                first: crate::neon_block::array_first_64,
+                best: crate::neon_block::array_best_64,
+                all: crate::neon_block::array_all_64,
             }),
             _ => None,
         };

@@ -1,7 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use hexhamming::{
     bytes_array_all_within_dist, bytes_array_best_within_dist, bytes_array_first_within_dist,
-    bytes_hamming_distance, bytes_within_dist, hex_hamming_distance, set_algorithm,
+    bytes_hamming_distance, bytes_pairwise_distances_into, bytes_within_dist, hex_hamming_distance,
+    set_algorithm,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -322,7 +323,7 @@ fn bench_fixed_width_array_matrix(c: &mut Criterion) {
         "threshold_d_plus_1",
     ];
 
-    for width in [16usize, 32] {
+    for width in [8usize, 16, 32, 64] {
         let mut group = c.benchmark_group(format!("array_matrix/{width}byte_records"));
         for scenario in scenarios {
             let (big, small, max_dist) = fixed_width_array_case(width, scenario);
@@ -392,7 +393,7 @@ fn bench_fixed_width_scanner_vs_kernel(c: &mut Criterion) {
             let mut group = c.benchmark_group(format!(
                 "array_scanner/{scanner_algo}_vs_{kernel_algo}/{role}"
             ));
-            for &width in &[16usize, 32] {
+            for &width in &[8usize, 16, 32, 64] {
                 // Same random-no-match scenario as the C4 baseline (see the
                 // catalog benchmarks in `array_api/512x16_random_no_match`) to
                 // allow before/after comparison at that data point.
@@ -482,6 +483,23 @@ fn bench_fixed_width_parallel_crossover(c: &mut Criterion) {
     group.finish();
 }
 
+/// Pairwise distances between corresponding records of two buffers.
+fn bench_pairwise(c: &mut Criterion) {
+    const COUNT: usize = 10_000;
+    let mut group = c.benchmark_group("pairwise_into");
+    for width in [8usize, 16, 20, 24, 32, 64] {
+        let a = pseudo_random_bytes(COUNT * width, 0xE1 + width as u64);
+        let b = pseudo_random_bytes(COUNT * width, 0xF1 + width as u64);
+        let mut out = vec![0u8; COUNT * 8];
+        group.bench_function(format!("{COUNT}x{width}byte"), |bencher| {
+            bencher.iter(|| {
+                bytes_pairwise_distances_into(black_box(&a), black_box(&b), width, &mut out)
+            })
+        });
+    }
+    group.finish();
+}
+
 #[cfg(target_arch = "aarch64")]
 fn bench_hex_string_pack(c: &mut Criterion) {
     // AArch64-only group for the packed NEON hex-string path.
@@ -507,6 +525,7 @@ criterion_group!(
     bench_fixed_width_array_matrix,
     bench_fixed_width_scanner_vs_kernel,
     bench_fixed_width_parallel_crossover,
+    bench_pairwise,
     bench_hex_string_pack
 );
 #[cfg(target_arch = "x86_64")]
@@ -519,7 +538,8 @@ criterion_group!(
     bench_array_random_and_boundaries,
     bench_fixed_width_array_matrix,
     bench_fixed_width_scanner_vs_kernel,
-    bench_fixed_width_parallel_crossover
+    bench_fixed_width_parallel_crossover,
+    bench_pairwise
 );
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 criterion_group!(
@@ -530,6 +550,7 @@ criterion_group!(
     bench_array_api,
     bench_array_random_and_boundaries,
     bench_fixed_width_array_matrix,
-    bench_fixed_width_parallel_crossover
+    bench_fixed_width_parallel_crossover,
+    bench_pairwise
 );
 criterion_main!(benches);

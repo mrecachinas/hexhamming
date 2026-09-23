@@ -42,6 +42,10 @@ pub fn bytes_pairwise_distances(
     if count == 0 {
         return Ok(Vec::new());
     }
+    #[cfg(target_arch = "aarch64")]
+    if neon_pairwise_enabled(element_size) {
+        return Ok(crate::neon_block::pairwise_distances(a, b, element_size));
+    }
     let kernel = select_bytes_kernel_for_width(element_size);
     Ok(a.chunks_exact(element_size)
         .zip(b.chunks_exact(element_size))
@@ -81,6 +85,11 @@ pub fn bytes_pairwise_distances_into(
     if count == 0 {
         return Ok(0);
     }
+    #[cfg(target_arch = "aarch64")]
+    if neon_pairwise_enabled(element_size) {
+        crate::neon_block::pairwise_distances_into(a, b, element_size, out);
+        return Ok(count);
+    }
     let kernel = select_bytes_kernel_for_width(element_size);
     for ((a_chunk, b_chunk), out_chunk) in a
         .chunks_exact(element_size)
@@ -90,6 +99,17 @@ pub fn bytes_pairwise_distances_into(
         out_chunk.copy_from_slice(&kernel(a_chunk, b_chunk, -1).to_le_bytes());
     }
     Ok(count)
+}
+
+/// Fixed-width NEON pairwise kernels replace the per-record kernel call for
+/// common widths when the active algorithm would use NEON anyway.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn neon_pairwise_enabled(element_size: usize) -> bool {
+    use crate::{ALGO_NATIVE, ALGO_NEON, CURRENT_ALGO};
+    let algo = CURRENT_ALGO.load(std::sync::atomic::Ordering::Relaxed);
+    (algo == ALGO_NATIVE || algo == ALGO_NEON)
+        && crate::neon_block::has_pairwise_kernel(element_size)
 }
 
 /// Validate common catalog + queries inputs and return `(query_count,
