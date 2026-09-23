@@ -88,10 +88,10 @@ jobs:
             expect: sse4.1,popcnt,!avx2,!avx512f
           - cpu: hsw # Haswell: AVX2
             expect: avx2,popcnt,!avx512f
-          - cpu: skx # Skylake-SP: AVX-512 F/BW without BITALG/VBMI
-            expect: avx512f,avx512bw,!avx512bitalg,!avx512vbmi
-          - cpu: icl # Ice Lake: AVX-512 with BITALG and VBMI
-            expect: avx512f,avx512bw,avx512bitalg,avx512vbmi
+          - cpu: skx # Skylake-SP: AVX-512 F/BW without BITALG/VBMI/VPOPCNTDQ
+            expect: avx512f,avx512bw,!avx512bitalg,!avx512vbmi,!avx512vpopcntdq
+          - cpu: icl # Ice Lake: AVX-512 with BITALG, VBMI and VPOPCNTDQ
+            expect: avx512f,avx512bw,avx512bitalg,avx512vbmi,avx512vpopcntdq
     env:
       SDE_RELEASE: sde-external-10.13.1-2026-07-28-lin
       SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
