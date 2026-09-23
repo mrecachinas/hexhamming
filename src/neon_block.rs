@@ -24,6 +24,8 @@ trait BlockScanner {
     const MAX_DIST: u64;
     /// `mask` sets bit `lane << LANE_SHIFT` for every matching lane.
     const LANE_SHIFT: u32;
+    /// `mask` when every lane matches.
+    const FULL: u64 = full_mask(Self::RECORDS, Self::LANE_SHIFT);
     type Query: Copy;
     type Totals: Copy;
 
@@ -34,6 +36,16 @@ trait BlockScanner {
     unsafe fn mask(totals: Self::Totals, limit: u64) -> u64;
     unsafe fn store(totals: Self::Totals, out: &mut [u32; 16]);
     unsafe fn distance(record: *const u8, query: Self::Query) -> u64;
+}
+
+const fn full_mask(records: usize, lane_shift: u32) -> u64 {
+    let mut mask = 0;
+    let mut lane = 0;
+    while lane < records {
+        mask |= 1 << ((lane as u32) << lane_shift);
+        lane += 1;
+    }
+    mask
 }
 
 #[inline(always)]
@@ -364,7 +376,7 @@ unsafe fn all<S: BlockScanner>(records: &[u8], query: &[u8], max_dist: i64) -> V
     debug_assert_eq!(query.len(), S::WIDTH);
     let count = records.len() / S::WIDTH;
     let limit = limit_for::<S>(max_dist);
-    let mut matches = Vec::new();
+    let mut matches: Vec<(u64, usize)> = Vec::new();
     let q = S::load_query(query.as_ptr());
     let base = records.as_ptr();
     let mut totals = [0u32; 16];
@@ -374,11 +386,28 @@ unsafe fn all<S: BlockScanner>(records: &[u8], query: &[u8], max_dist: i64) -> V
         let mut mask = S::mask(block, limit);
         if mask != 0 {
             S::store(block, &mut totals);
-            while mask != 0 {
-                let lane = (mask.trailing_zeros() >> S::LANE_SHIFT) as usize;
-                mask &= mask - 1;
-                matches.push((totals[lane] as u64, index + lane));
+            // One capacity check per block rather than per match, and no lane
+            // walk when the whole block matches.
+            matches.reserve(S::RECORDS);
+            let len = matches.len();
+            let out = matches.as_mut_ptr().add(len);
+            let mut written = 0;
+            if mask == S::FULL {
+                for (lane, &distance) in totals[..S::RECORDS].iter().enumerate() {
+                    out.add(lane).write((distance as u64, index + lane));
+                }
+                written = S::RECORDS;
+            } else {
+                while mask != 0 {
+                    let lane = (mask.trailing_zeros() >> S::LANE_SHIFT) as usize;
+                    mask &= mask - 1;
+                    out.add(written).write((totals[lane] as u64, index + lane));
+                    written += 1;
+                }
             }
+            // SAFETY: `written <= RECORDS` slots past `len` were reserved above
+            // and initialized just now.
+            matches.set_len(len + written);
         }
         index += S::RECORDS;
     }
@@ -638,6 +667,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn full_mask_is_every_lane_matching() {
+        fn check<S: BlockScanner>() {
+            let records = vec![0x5Au8; S::WIDTH * S::RECORDS];
+            let query = vec![0xA5u8; S::WIDTH];
+            unsafe {
+                let totals = S::totals(records.as_ptr(), S::load_query(query.as_ptr()));
+                assert_eq!(S::mask(totals, S::MAX_DIST), S::FULL, "width={}", S::WIDTH);
+                assert_ne!(
+                    S::mask(totals, S::MAX_DIST - 1),
+                    S::FULL,
+                    "width={}",
+                    S::WIDTH
+                );
+            }
+        }
+        check::<W8>();
+        check::<W16>();
+        check::<W32>();
+        check::<W64>();
     }
 
     #[test]
