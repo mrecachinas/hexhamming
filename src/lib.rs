@@ -25,6 +25,8 @@ mod classic;
 mod hex;
 mod native;
 #[cfg(target_arch = "aarch64")]
+mod neon_block;
+#[cfg(target_arch = "aarch64")]
 mod neon_simd;
 #[cfg(feature = "python")]
 mod python;
