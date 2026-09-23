@@ -30,7 +30,8 @@ jobs:
       - name: Ruff
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          # Pinned so new ruff releases cannot change the rule set under a PR.
+          pip install ruff==0.16.8
           ruff check .
           ruff format --check .
 
@@ -134,7 +135,11 @@ jobs:
         run: cargo test --no-default-features --release
 
       - name: Python tests
-        run: sde64 -${{ matrix.cpu }} -- python -m pytest -q -p no:cacheprovider test/ -k "not bench"
+        # Emulation makes wall-clock assertions meaningless, so skip the one
+        # timing test along with the benchmarks.
+        run: >-
+          sde64 -${{ matrix.cpu }} -- python -m pytest -q -p no:cacheprovider test/
+          -k "not bench and not test_check_hexstrings_within_dist_long_random_fast"
 
   build-and-test:
     name: Testing on ${{ matrix.os }} with Python ${{ matrix.python-version }}

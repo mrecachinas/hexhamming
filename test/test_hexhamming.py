@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import random
 from platform import machine
 
