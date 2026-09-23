@@ -29,6 +29,7 @@ mod native;
 mod neon_block;
 #[cfg(target_arch = "aarch64")]
 mod neon_simd;
+mod par;
 #[cfg(feature = "python")]
 mod python;
 // Raw METH_FASTCALL bindings rely on CPython's tuple macros and object

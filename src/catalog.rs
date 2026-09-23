@@ -13,6 +13,8 @@
 //! still giving large wins for small radii. Widths that would require more
 //! than the supported number of substring tables simply keep a linear catalog.
 
+use crate::api::select_array_scanner_for_width;
+use crate::par;
 use crate::{
     bytes_array_all_many_within_dist, bytes_array_all_within_dist,
     bytes_array_best_many_within_dist, bytes_array_best_within_dist,
@@ -31,23 +33,25 @@ const MAX_PROBE_RADIUS: usize = 4;
 // (Apple M4 Max, block scanners): a bucket probe, including verifying its
 // ~N/2^s records, costs 1.2-5.6 ns, rising with index size as probes miss
 // cache and TLB. A linear scan costs about 0.11 ns per record or 0.0133 ns
-// per byte, whichever is larger, and ~2.5x less once scans run in parallel.
-// Slower linear scans elsewhere only make the planner more conservative.
+// per byte, whichever is larger; split across threads it runs about 1.2x
+// faster at 4 MiB, 1.8x at 8 MiB and ~3x from 16 MiB. Slower linear scans
+// elsewhere only make the planner more conservative.
 const QUERY_OVERHEAD_NS: f64 = 50.0;
 const PROBE_BASE_NS: f64 = 1.5;
 const PROBE_CACHE_MISS_NS: f64 = 4.0;
 const PROBE_MISS_SATURATION_BYTES: f64 = (128u64 << 20) as f64;
 const SCAN_NS_PER_RECORD: f64 = 0.11;
 const SCAN_NS_PER_BYTE: f64 = 0.0133;
-const PARALLEL_SCAN_BYTES: usize = 16 << 20;
-const PARALLEL_SCAN_SPEEDUP: f64 = 2.5;
+const PARALLEL_SPEEDUP_BYTES: f64 = (5u64 << 20) as f64;
+const MAX_PARALLEL_SPEEDUP: f64 = 3.0;
 
 /// Estimated cost of scanning `n` records of `width` bytes linearly.
 fn linear_scan_ns(n: usize, width: usize) -> f64 {
     let bytes = n.saturating_mul(width);
     let serial = (n as f64 * SCAN_NS_PER_RECORD).max(bytes as f64 * SCAN_NS_PER_BYTE);
-    if bytes >= PARALLEL_SCAN_BYTES {
-        serial / PARALLEL_SCAN_SPEEDUP
+    let threshold = crate::api::parallel_threshold(select_array_scanner_for_width(width).is_some());
+    if bytes >= threshold {
+        serial / (bytes as f64 / PARALLEL_SPEEDUP_BYTES).clamp(1.0, MAX_PARALLEL_SPEEDUP)
     } else {
         serial
     }
@@ -393,10 +397,9 @@ impl Catalog {
                 max_dist,
             );
         }
-        queries
-            .chunks_exact(self.width)
-            .map(|query| self.first_within(query, max_dist))
-            .collect()
+        self.map_indexed_queries(queries, max_dist, |query| {
+            self.first_within(query, max_dist)
+        })
     }
 
     pub fn best_many_within(
@@ -408,10 +411,7 @@ impl Catalog {
         if self.index_for_radius(max_dist).is_none() {
             return bytes_array_best_many_within_dist(&self.records, queries, self.width, max_dist);
         }
-        queries
-            .chunks_exact(self.width)
-            .map(|query| self.best_within(query, max_dist))
-            .collect()
+        self.map_indexed_queries(queries, max_dist, |query| self.best_within(query, max_dist))
     }
 
     pub fn all_many_within(
@@ -423,10 +423,35 @@ impl Catalog {
         if self.index_for_radius(max_dist).is_none() {
             return bytes_array_all_many_within_dist(&self.records, queries, self.width, max_dist);
         }
-        queries
-            .chunks_exact(self.width)
-            .map(|query| self.all_within(query, max_dist))
-            .collect()
+        self.map_indexed_queries(queries, max_dist, |query| self.all_within(query, max_dist))
+    }
+
+    /// Run `f` for every query in order, spreading queries across threads when
+    /// their estimated total cost matches a linear scan worth splitting.
+    fn map_indexed_queries<R, F>(
+        &self,
+        queries: &[u8],
+        max_dist: i64,
+        f: F,
+    ) -> Result<Vec<R>, &'static str>
+    where
+        R: Send,
+        F: Fn(&[u8]) -> Result<R, &'static str> + Sync,
+    {
+        let count = queries.len() / self.width;
+        let query = |q: usize| &queries[q * self.width..(q + 1) * self.width];
+        let bytes_equivalent = (self.estimated_query_ns(max_dist) / SCAN_NS_PER_BYTE) as usize;
+        let threshold = crate::api::parallel_threshold(true);
+        let Some(plan) = par::plan_items(count, bytes_equivalent, threshold) else {
+            return (0..count).map(|q| f(query(q))).collect();
+        };
+        par::map_chunks(plan.chunks, |chunk| {
+            let (start, end) = plan.range(chunk, count);
+            (start..end).map(|q| f(query(q))).collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Estimated nanoseconds for one query at `max_dist` with the strategy the
