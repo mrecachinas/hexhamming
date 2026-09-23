@@ -833,14 +833,19 @@ def test_check_hexstrings_within_dist_long_random_fast():
 
     a = secrets.token_hex(512)
     c = secrets.token_hex(512)
-    n = 50000
+    n = 10000
     # Warm up
     for _ in range(5):
         check_hexstrings_within_dist(a, c, 100)
-    t0 = time.perf_counter()
-    for _ in range(n):
-        check_hexstrings_within_dist(a, c, 100)
-    elapsed_us = (time.perf_counter() - t0) / n * 1e6
+    # Best of several rounds: shared CI runners are noisy, and a regression
+    # slows every round while interference only slows some.
+    rounds = []
+    for _ in range(7):
+        t0 = time.perf_counter()
+        for _ in range(n):
+            check_hexstrings_within_dist(a, c, 100)
+        rounds.append((time.perf_counter() - t0) / n * 1e6)
+    elapsed_us = min(rounds)
     # Target: < 0.15 us (baseline was 0.095 us, regressed to ~0.19 us)
     assert elapsed_us < 0.15, (
         f"random+tight took {elapsed_us:.3f} us, expected < 0.15 us"
