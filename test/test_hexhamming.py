@@ -4,8 +4,12 @@ from platform import machine, python_implementation
 
 import pytest
 from hexhamming import (
+    Catalog,
+    check_bytes_arrays_all_many_within_dist,
     check_bytes_arrays_all_within_dist,
+    check_bytes_arrays_best_many_within_dist,
     check_bytes_arrays_best_within_dist,
+    check_bytes_arrays_first_many_within_dist,
     check_bytes_arrays_first_within_dist,
     check_bytes_arrays_within_dist,
     check_bytes_within_dist,
@@ -55,6 +59,116 @@ def test_hamming_distance_string(hex1, hex2, expected):
     # the explicit classic string path to the same result as the default path.
     assert len(set_algo("classic")) == 0
     assert expected == hamming_distance_string(hex1, hex2)
+
+
+############################
+# Catalog API
+############################
+
+
+def _lcg_bytes(size, seed):
+    state = seed
+    out = bytearray(size)
+    for i in range(size):
+        state = (state * 6364136223846793005 + 1442695040888963407) & ((1 << 64) - 1)
+        out[i] = (state >> 32) & 0xFF
+    return bytes(out)
+
+
+def _flip_bits(buf, bits):
+    data = bytearray(buf)
+    for bit in bits:
+        data[bit // 8] ^= 1 << (bit & 7)
+    return bytes(data)
+
+
+def test_catalog_api_matches_free_functions():
+    width = 8
+    records = bytearray(_lcg_bytes(width * 2048, 11))
+    query = _flip_bits(records[123 * width : 124 * width], [1, 9])
+    records[700 * width : 701 * width] = query
+    records = bytes(records)
+
+    linear = Catalog(records, width)
+    indexed = Catalog(records, width, index=True)
+    assert len(linear) == 2048
+    assert linear.width == width
+    assert not linear.has_index
+    assert indexed.has_index
+
+    for radius in (0, 2, 8, 64):
+        expected_first = check_bytes_arrays_first_within_dist(records, query, radius)
+        expected_best = check_bytes_arrays_best_within_dist(records, query, radius)
+        expected_all = check_bytes_arrays_all_within_dist(records, query, radius)
+        assert linear.first_within(query, radius) == expected_first
+        assert indexed.first_within(query, radius) == expected_first
+        assert linear.best_within(query, radius) == expected_best
+        assert indexed.best_within(query, radius) == expected_best
+        assert linear.all_within(query, radius) == expected_all
+        assert indexed.all_within(query, radius) == expected_all
+
+
+def test_catalog_many_api_matches_free_functions():
+    width = 8
+    records = _lcg_bytes(width * 2048, 21)
+    queries = (
+        records[0:width]
+        + _flip_bits(records[99 * width : 100 * width], [0, 17])
+        + _lcg_bytes(width, 22)
+    )
+    cat = Catalog(records, width, index=True)
+    for radius in (0, 2, 8, 64):
+        assert cat.first_many_within(
+            queries, radius
+        ) == check_bytes_arrays_first_many_within_dist(records, queries, width, radius)
+        assert cat.best_many_within(
+            queries, radius
+        ) == check_bytes_arrays_best_many_within_dist(records, queries, width, radius)
+        assert cat.all_many_within(
+            queries, radius
+        ) == check_bytes_arrays_all_many_within_dist(records, queries, width, radius)
+
+
+def test_catalog_buffer_inputs_and_errors():
+    np = pytest.importorskip("numpy")
+    records = bytearray(b"\x00\x00\xff\xff\x0f\xf0")
+    cat = Catalog(memoryview(records), 2, index=True)
+    assert cat.first_within(bytearray(b"\xff\xff"), 0) == 1
+    assert cat.best_within(np.frombuffer(b"\x0f\xf0", dtype=np.uint8), 0) == (0, 2)
+    assert cat.all_within(memoryview(b"\x00\x00"), 0) == [(0, 0)]
+
+    with pytest.raises(ValueError, match="width must be >0"):
+        Catalog(b"abc", 0)
+    with pytest.raises(ValueError, match="records size must be multiplier"):
+        Catalog(b"abc", 2)
+    with pytest.raises(ValueError, match="query size must equal catalog width"):
+        cat.first_within(b"\x00", 0)
+    with pytest.raises(ValueError, match="queries size must be multiplier"):
+        cat.first_many_within(b"\x00", 0)
+    with pytest.raises(ValueError, match="`max_dist` must be >=0"):
+        cat.first_within(b"\x00\x00", -1)
+
+
+def test_catalog_queries_release_gil_from_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    width = 8
+    records = _lcg_bytes(width * 4096, 31)
+    cat = Catalog(records, width, index=True)
+    queries = [records[i * width : (i + 1) * width] for i in range(0, 128, 7)]
+
+    def run(query):
+        return (
+            cat.first_within(query, 0),
+            cat.best_within(query, 0),
+            cat.all_within(query, 0),
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        got = list(executor.map(run, queries * 20))
+    assert all(
+        first >= 0 and best[0] == 0 and all_matches for first, best, all_matches in got
+    )
 
 
 @pytest.mark.parametrize(
@@ -815,7 +929,9 @@ def test_functions_are_bound_to_extension_module():
     names = [
         name
         for name in dir(ext)
-        if callable(getattr(ext, name)) and not name.startswith("_")
+        if callable(getattr(ext, name))
+        and hasattr(getattr(ext, name), "__self__")
+        and not name.startswith("_")
     ]
     assert "hamming_distance_string" in names
     for name in names:
@@ -881,7 +997,8 @@ def test_module_functions_pickle_by_reference():
     assert set(RAW_FASTCALL_FUNCTIONS) <= set(names)
     for name in names:
         func = getattr(ext, name)
-        assert func.__module__ == ext.__name__, name
+        if inspect.isbuiltin(func):
+            assert func.__module__ == ext.__name__, name
         assert pickle.loads(pickle.dumps(func)) is func, name
 
 
