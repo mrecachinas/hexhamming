@@ -5,10 +5,142 @@ on:
     branches: [ main ]
     tags:
       - '*'
+  # Run on every pull request, not only those targeting main, so each layer of
+  # a stacked PR series is built and tested against its own base branch.
   pull_request:
-    branches: [ main ]
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Ruff
+        run: |
+          python -m pip install --upgrade pip
+          # Pinned so new ruff releases cannot change the rule set under a PR.
+          pip install ruff==0.16.8
+          ruff check .
+          ruff format --check .
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
+  rust-tests:
+    name: Rust tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      # SIMD tests skip backends the runner cannot execute, so record which
+      # instruction sets were available for this run.
+      - name: Report CPU
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              lscpu | grep 'Model name'
+              for flag in sse4_1 popcnt avx2 avx512bw avx512_bitalg avx512vbmi; do
+                if grep -qw "$flag" /proc/cpuinfo; then echo "$flag: yes"; else echo "$flag: no"; fi
+              done ;;
+            macOS) sysctl -n machdep.cpu.brand_string ;;
+            Windows) powershell -Command "(Get-CimInstance Win32_Processor).Name" ;;
+          esac
+
+      - name: Run Rust tests
+        run: cargo test --no-default-features --release
+
+  x86-emulated:
+    name: x86 tests under Intel SDE (${{ matrix.cpu }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Runner hardware decides which SIMD backend runs natively, so the
+          # SSE-only, AVX2-only and AVX-512 dispatch paths are exercised on
+          # emulated CPUs. `expect` makes the run fail if emulation did not
+          # expose (or hide) the listed features.
+          - cpu: nhm # Nehalem: SSE4.2 + POPCNT
+            expect: sse4.1,popcnt,!avx2,!avx512f
+          - cpu: hsw # Haswell: AVX2
+            expect: avx2,popcnt,!avx512f
+          - cpu: skx # Skylake-SP: AVX-512 F/BW without BITALG/VBMI/VPOPCNTDQ
+            expect: avx512f,avx512bw,!avx512bitalg,!avx512vbmi,!avx512vpopcntdq
+          - cpu: icl # Ice Lake: AVX-512 with BITALG, VBMI and VPOPCNTDQ
+            expect: avx512f,avx512bw,avx512bitalg,avx512vbmi,avx512vpopcntdq
+    env:
+      SDE_RELEASE: sde-external-10.13.1-2026-07-28-lin
+      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Install Intel SDE
+        run: |
+          archive="$RUNNER_TEMP/sde.tar.xz"
+          curl -fsSL --retry 3 -o "$archive" "https://downloadmirror.intel.com/924984/$SDE_RELEASE.tar.xz" ||
+            curl -fsSL --retry 3 -o "$archive" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$SDE_RELEASE.tar.xz"
+          echo "$SDE_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$SDE_RELEASE" >> "$GITHUB_PATH"
+          # SDE injects into the child process via ptrace.
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+
+      - name: Build
+        run: |
+          cargo test --no-default-features --release --no-run
+          python -m pip install --upgrade pip
+          pip install maturin pytest
+          maturin build --release
+          pip install target/wheels/*.whl
+
+      - name: Rust tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sde64 -${{ matrix.cpu }} --
+          HEXHAMMING_EXPECT_X86_FEATURES: ${{ matrix.expect }}
+        run: cargo test --no-default-features --release
+
+      - name: Python tests
+        # Emulation makes wall-clock assertions meaningless, so skip the one
+        # timing test along with the benchmarks.
+        run: >-
+          sde64 -${{ matrix.cpu }} -- python -m pytest -q -p no:cacheprovider test/
+          -k "not bench and not test_check_hexstrings_within_dist_long_random_fast"
+
   build-and-test:
     name: Testing on ${{ matrix.os }} with Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
@@ -17,6 +149,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Releases ship PyPy wheels for Linux, so PyPy must keep building.
+          - os: ubuntu-latest
+            python-version: "pypy3.11"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

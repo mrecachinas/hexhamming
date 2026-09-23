@@ -1,8 +1,9 @@
 name: Benchmark PR
 
 on:
+  # Every pull request, including stacked PRs whose base is another PR branch,
+  # so each layer is benchmarked against the layer below it.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
