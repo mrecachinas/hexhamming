@@ -5,10 +5,72 @@ on:
     branches: [ main ]
     tags:
       - '*'
+  # Run on every pull request, not only those targeting main, so each layer of
+  # a stacked PR series is built and tested against its own base branch.
   pull_request:
-    branches: [ main ]
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          ruff check .
+          ruff format --check .
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
+  rust-tests:
+    name: Rust tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      # SIMD tests skip backends the runner cannot execute, so record which
+      # instruction sets were available for this run.
+      - name: Report CPU
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              lscpu | grep 'Model name'
+              for flag in sse4_1 popcnt avx2 avx512bw avx512_bitalg avx512vbmi; do
+                if grep -qw "$flag" /proc/cpuinfo; then echo "$flag: yes"; else echo "$flag: no"; fi
+              done ;;
+            macOS) sysctl -n machdep.cpu.brand_string ;;
+            Windows) powershell -Command "(Get-CimInstance Win32_Processor).Name" ;;
+          esac
+
+      - name: Run Rust tests
+        run: cargo test --no-default-features --release
+
   build-and-test:
     name: Testing on ${{ matrix.os }} with Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}

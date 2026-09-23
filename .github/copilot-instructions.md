@@ -34,8 +34,9 @@ python3 -m pytest -vls .
 python3 -m pytest test/ -k "not bench"
 # Takes ~5 seconds for functional tests only.
 
-# Run Rust unit tests
-cargo test
+# Run Rust unit tests (the default `python` feature builds an extension
+# module that cannot link into a test binary)
+cargo test --no-default-features
 ```
 
 ### Code Quality and CI Requirements
@@ -175,6 +176,10 @@ python3 -m pytest -vls .  # Full test suite
 
 ### CI/CD Information
 The project uses GitHub Actions with maturin for cross-platform wheel building:
+- Runs on every pull request (including stacked PRs whose base is not `main`)
+- `lint`: `ruff check`, `ruff format --check`, `cargo fmt --check`
+- `rust-tests`: `cargo test --no-default-features --release` on Linux, macOS, and Windows;
+  SIMD tests skip instruction sets the runner lacks, and the job logs which were available
 - Builds wheels for Linux (manylinux), macOS, Windows
 - Tests on Python 3.10-3.14
 - **Build time in CI**: 15-45 minutes depending on platform
