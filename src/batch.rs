@@ -274,33 +274,19 @@ where
             .map(|q| parallel(&scan(q), catalog))
             .collect());
     }
-    let mut results = Vec::with_capacity(query_count);
-    if let Some((budget, stopped)) = prefix {
-        // Counted in records, so the loop costs no more per query than a
-        // plain serial one.
-        let records = catalog.len() / query_width;
-        let budget = budget / query_width;
-        let limit = threshold / query_width;
-        let mut read = 0usize;
-        while results.len() < query_count {
-            let answered = results.len();
-            let cap = if read < budget {
-                budget
-            } else if read.saturating_mul(query_count) < limit.saturating_mul(answered) {
-                limit
-            } else {
-                break;
-            };
-            let window = records.min(cap - read);
-            let result = serial(&scan(answered), &catalog[..window * query_width]);
-            read += match stopped(&result) {
-                Some(stopped_after) => stopped_after,
-                None if window == records => window,
-                None => break,
-            };
-            results.push(result);
-        }
-    }
+    let mut results = match prefix {
+        Some(prefix) => serial_prefix(
+            catalog,
+            queries,
+            query_width,
+            max_dist,
+            (kernel, scanner),
+            prefix,
+            threshold,
+            &serial,
+        ),
+        None => Vec::with_capacity(query_count),
+    };
     let done = results.len();
     let rest = query_count - done;
     match par::plan_items(rest, catalog.len(), threshold) {
@@ -319,6 +305,53 @@ where
         None => results.extend((done..query_count).map(|q| serial(&scan(q), catalog))),
     }
     Ok(results)
+}
+
+/// The serial prefix of [`map_queries_with`]: results for the queries it
+/// answers, from the first. Out of line, so its loop has the registers to
+/// itself and costs no more per query than a plain serial loop; the budget
+/// and threshold are counted in records for the same reason.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn serial_prefix<R, S>(
+    catalog: &[u8],
+    queries: &[u8],
+    query_width: usize,
+    max_dist: i64,
+    (kernel, scanner): (BytesKernel, Option<ArrayScanner>),
+    (budget, stopped): (usize, StoppedEarly<R>),
+    threshold: usize,
+    serial: &S,
+) -> Vec<R>
+where
+    S: Fn(&Scan<'_>, &[u8]) -> R,
+{
+    let query_count = queries.len() / query_width;
+    let records = catalog.len() / query_width;
+    let budget = budget / query_width;
+    let limit = threshold / query_width;
+    let mut results = Vec::with_capacity(query_count);
+    let mut read = 0usize;
+    for query in queries.chunks_exact(query_width) {
+        let answered = results.len();
+        let cap = if read < budget {
+            budget
+        } else if read.saturating_mul(query_count) < limit.saturating_mul(answered) {
+            limit
+        } else {
+            break;
+        };
+        let window = records.min(cap - read);
+        let scan = Scan::with_kernels(query, max_dist, kernel, scanner);
+        let result = serial(&scan, &catalog[..window * query_width]);
+        read += match stopped(&result) {
+            Some(stopped_after) => stopped_after,
+            None if window == records => window,
+            None => break,
+        };
+        results.push(result);
+    }
+    results
 }
 
 /// Multi-query variant of [`bytes_array_first_within_dist`]:
