@@ -1,3 +1,4 @@
+import inspect
 import random
 from platform import machine, python_implementation
 
@@ -6,10 +7,12 @@ from hexhamming import (
     check_bytes_arrays_all_within_dist,
     check_bytes_arrays_best_within_dist,
     check_bytes_arrays_first_within_dist,
+    check_bytes_arrays_within_dist,
     check_bytes_within_dist,
     check_hexstrings_within_dist,
     hamming_distance_bytes,
     hamming_distance_string,
+    hamming_distances_bytes,
     set_algo,
 )
 
@@ -817,6 +820,191 @@ def test_functions_are_bound_to_extension_module():
     assert "hamming_distance_string" in names
     for name in names:
         assert getattr(ext, name).__self__ is ext, name
+
+
+RAW_FASTCALL_FUNCTIONS = {
+    "hamming_distance_string": ("a", "b"),
+    "hamming_distance_bytes": ("a", "b"),
+    "check_hexstrings_within_dist": ("a", "b", "max_dist"),
+    "check_bytes_within_dist": ("a", "b", "max_dist"),
+    "check_bytes_arrays_within_dist": (
+        "array_of_elems",
+        "elem_to_compare",
+        "max_dist",
+    ),
+    "check_bytes_arrays_first_within_dist": (
+        "array_of_elems",
+        "elem_to_compare",
+        "max_dist",
+    ),
+    "check_bytes_arrays_best_within_dist": (
+        "array_of_elems",
+        "elem_to_compare",
+        "max_dist",
+    ),
+    "check_bytes_arrays_all_within_dist": (
+        "array_of_elems",
+        "elem_to_compare",
+        "max_dist",
+    ),
+    "hamming_distances_bytes": ("a", "b", "element_size"),
+}
+
+
+def test_raw_fastcall_metadata_matches_pyo3_shape():
+    """Raw C-API replacements preserve PyO3-visible signatures and binding."""
+    import hexhamming.hexhamming as ext
+
+    for name, params in RAW_FASTCALL_FUNCTIONS.items():
+        func = getattr(ext, name)
+        assert func.__self__ is ext
+        assert inspect.signature(func) == inspect.Signature(
+            inspect.Parameter(p, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for p in params
+        )
+        assert func.__text_signature__ == f"($module, {', '.join(params)})"
+        assert func.__doc__
+
+
+def test_module_functions_pickle_by_reference():
+    """Every function keeps a str ``__module__`` naming the extension module, so
+    pickle (and therefore multiprocessing) can resolve it by reference."""
+    import pickle
+
+    import hexhamming.hexhamming as ext
+
+    names = [
+        name
+        for name in dir(ext)
+        if callable(getattr(ext, name)) and not name.startswith("_")
+    ]
+    assert set(RAW_FASTCALL_FUNCTIONS) <= set(names)
+    for name in names:
+        func = getattr(ext, name)
+        assert func.__module__ == ext.__name__, name
+        assert pickle.loads(pickle.dumps(func)) is func, name
+
+
+@pytest.mark.parametrize(
+    "func,args,kwargs,expected",
+    (
+        (hamming_distance_string, (), {"a": "ab", "b": "cd"}, 4),
+        (hamming_distance_string, ("ab",), {"b": "cd"}, 4),
+        (hamming_distance_bytes, (), {"a": b"\x00", "b": b"\xff"}, 8),
+        (
+            check_hexstrings_within_dist,
+            (),
+            {"a": "ffff", "b": "fffe", "max_dist": 1},
+            True,
+        ),
+        (
+            check_bytes_within_dist,
+            (),
+            {"a": b"\x00", "b": b"\x01", "max_dist": 1},
+            True,
+        ),
+        (
+            check_bytes_arrays_within_dist,
+            (),
+            {"array_of_elems": b"\x00\xff", "elem_to_compare": b"\xff", "max_dist": 0},
+            1,
+        ),
+        (
+            check_bytes_arrays_first_within_dist,
+            (),
+            {"array_of_elems": b"\x00\xff", "elem_to_compare": b"\xff", "max_dist": 0},
+            1,
+        ),
+        (
+            check_bytes_arrays_best_within_dist,
+            (),
+            {"array_of_elems": b"\x00\xff", "elem_to_compare": b"\xff", "max_dist": 8},
+            (0, 1),
+        ),
+        (
+            check_bytes_arrays_all_within_dist,
+            (),
+            {"array_of_elems": b"\x00\xff", "elem_to_compare": b"\xff", "max_dist": 8},
+            [(8, 0), (0, 1)],
+        ),
+        (
+            hamming_distances_bytes,
+            (),
+            {"a": b"\x00\xff", "b": b"\xff\xff", "element_size": 1},
+            [8, 0],
+        ),
+    ),
+)
+def test_raw_fastcall_keyword_argument_parity(func, args, kwargs, expected):
+    assert func(*args, **kwargs) == expected
+
+
+@pytest.mark.parametrize(
+    "func,args,kwargs,exc_type,msg",
+    (
+        (
+            hamming_distance_string,
+            (),
+            {},
+            TypeError,
+            "missing 2 required positional arguments: 'a' and 'b'",
+        ),
+        (
+            hamming_distance_string,
+            ("ab", "cd", "ef"),
+            {},
+            TypeError,
+            "takes 2 positional arguments but 3 were given",
+        ),
+        (
+            hamming_distance_string,
+            ("ab", "cd"),
+            {"a": "ab"},
+            TypeError,
+            "got multiple values for argument 'a'",
+        ),
+        (
+            hamming_distance_string,
+            ("ab",),
+            {"x": "cd"},
+            TypeError,
+            "got an unexpected keyword argument 'x'",
+        ),
+        (
+            check_hexstrings_within_dist,
+            ("ab",),
+            {},
+            TypeError,
+            "missing 2 required positional arguments: 'b' and 'max_dist'",
+        ),
+        (
+            check_bytes_arrays_first_within_dist,
+            ("ab",),
+            {"b": "cd"},
+            TypeError,
+            "got an unexpected keyword argument 'b'",
+        ),
+    ),
+)
+def test_raw_fastcall_argument_error_parity(func, args, kwargs, exc_type, msg):
+    with pytest.raises(exc_type) as excinfo:
+        func(*args, **kwargs)
+    assert msg in str(excinfo.value)
+
+
+def test_raw_fastcall_type_buffer_and_unicode_parity():
+    class StrSub(str):
+        pass
+
+    class BytesSub(bytes):
+        pass
+
+    assert hamming_distance_string(StrSub("ab"), StrSub("cd")) == 4
+    assert hamming_distance_bytes(BytesSub(b"\x00"), BytesSub(b"\xff")) == 8
+    with pytest.raises(UnicodeEncodeError):
+        hamming_distance_string("\ud800", "0")
+    with pytest.raises(ValueError, match="input must be contiguous"):
+        hamming_distance_bytes(memoryview(bytearray(b"abcd"))[::2], b"ab")
 
 
 # ---------------------------------------------------------------------------

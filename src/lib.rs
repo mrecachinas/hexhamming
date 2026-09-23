@@ -30,6 +30,10 @@ mod neon_block;
 mod neon_simd;
 #[cfg(feature = "python")]
 mod python;
+// Raw METH_FASTCALL bindings rely on CPython's tuple macros and object
+// layouts; other interpreters keep the PyO3 bindings.
+#[cfg(all(feature = "python", not(any(PyPy, GraalPy, RustPython))))]
+mod raw_python;
 #[cfg(test)]
 mod tests;
 #[cfg(target_arch = "x86_64")]
