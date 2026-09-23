@@ -1205,6 +1205,7 @@ fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Replace the hot PyO3 trampolines with raw FASTCALL|KEYWORDS functions.
     // PyO3 still owns module creation and the rest of the API surface.
+    #[cfg(not(any(PyPy, GraalPy, RustPython)))]
     if unsafe { crate::raw_python::register_all(m.as_ptr()) } < 0 {
         return Err(PyErr::fetch(m.py()));
     }
