@@ -176,19 +176,19 @@ fn resolve_multi_scan<'a>(
 /// across threads. See [`map_queries_with`].
 const EARLY_EXIT_PREFIX_SHARE: usize = 8;
 
-/// Bytes a scan read before it stopped early, or `None` if it read every
+/// Records a scan read before it stopped early, or `None` if it read every
 /// record it was given.
-type StoppedEarly<R> = fn(&R, usize) -> Option<usize>;
+type StoppedEarly<R> = fn(&R) -> Option<usize>;
 
 /// `first` stops at its match.
-fn first_stopped(found: &Option<usize>, width: usize) -> Option<usize> {
-    found.map(|index| (index + 1) * width)
+fn first_stopped(found: &Option<usize>) -> Option<usize> {
+    found.map(|index| index + 1)
 }
 
 /// `best` stops at an exact match.
-fn best_stopped(best: &Option<(u64, usize)>, width: usize) -> Option<usize> {
+fn best_stopped(best: &Option<(u64, usize)>) -> Option<usize> {
     match *best {
-        Some((0, index)) => Some((index + 1) * width),
+        Some((0, index)) => Some(index + 1),
         _ => None,
     }
 }
@@ -272,13 +272,17 @@ where
             .collect());
     }
     let mut results = Vec::with_capacity(query_count);
-    if let Some((mut budget, stopped)) = prefix {
-        while results.len() < query_count && budget >= query_width {
-            let window = catalog.len().min(budget - budget % query_width);
-            let result = serial(&scan(results.len()), &catalog[..window]);
-            let read = match stopped(&result, query_width) {
+    if let Some((budget, stopped)) = prefix {
+        // Counted in records, so the loop costs no more per query than a
+        // plain serial one.
+        let records = catalog.len() / query_width;
+        let mut budget = budget / query_width;
+        while results.len() < query_count && budget > 0 {
+            let window = records.min(budget);
+            let result = serial(&scan(results.len()), &catalog[..window * query_width]);
+            let read = match stopped(&result) {
                 Some(read) => read,
-                None if window == catalog.len() => window,
+                None if window == records => window,
                 None => break,
             };
             budget -= read;
@@ -297,7 +301,10 @@ where
             });
             results.extend(per_chunk.into_iter().flatten());
         }
-        None => results.extend((done..query_count).map(|q| parallel(&scan(q), catalog))),
+        None if each_query_splits => {
+            results.extend((done..query_count).map(|q| parallel(&scan(q), catalog)))
+        }
+        None => results.extend((done..query_count).map(|q| serial(&scan(q), catalog))),
     }
     Ok(results)
 }
@@ -517,7 +524,7 @@ mod tests {
                         width,
                         max_dist,
                         0,
-                        budget.map(|b| (b, (|_, _| None) as StoppedEarly<_>)),
+                        budget.map(|b| (b, (|_| None) as StoppedEarly<_>)),
                         |s, c| s.all(c),
                         |s, c| s.all_parallel(c),
                     )
