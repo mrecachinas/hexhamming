@@ -160,17 +160,16 @@ unsafe fn popcnt256_shuffle(v: __m256i, mask: __m256i, table: __m256i) -> __m256
 }
 
 /// AVX2 implementation for byte arrays - heavily optimized with batched horizontal sums
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2", enable = "popcnt")]
 pub unsafe fn hamming_distance_bytes_avx2(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
     let length = a.len();
     let mut i = 0;
 
-    // For small inputs, fall back to SSE or scalar
+    // The AVX2 dispatcher only selects this function after AVX2+POPCNT are
+    // detected, so small inputs can use an inline POPCNT path instead of
+    // re-running SSE/POPCNT feature detection and tail-calling the SSE kernel.
     if length < 64 {
-        if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("popcnt") {
-            return hamming_distance_bytes_sse(a, b, max_dist);
-        }
-        return hamming_distance_bytes_native(a, b, max_dist);
+        return hamming_distance_bytes_popcnt(a, b, max_dist);
     }
 
     // VPSHUFB lookup table for 4-bit popcount
@@ -194,6 +193,7 @@ pub unsafe fn hamming_distance_bytes_avx2(a: &[u8], b: &[u8], max_dist: i64) -> 
                 acc = _mm256_add_epi8(acc, popcnt256_shuffle(xor, mask, table));
                 i += 32;
             }
+
             total = _mm256_add_epi64(total, _mm256_sad_epu8(acc, _mm256_setzero_si256()));
         }
 
@@ -308,6 +308,37 @@ pub unsafe fn hamming_distance_bytes_avx2(a: &[u8], b: &[u8], max_dist: i64) -> 
     }
 }
 
+#[target_feature(enable = "popcnt")]
+unsafe fn hamming_distance_bytes_popcnt(a: &[u8], b: &[u8], max_dist: i64) -> u64 {
+    let length = a.len();
+    let mut difference: u64 = 0;
+    let mut i = 0;
+    let max_dist_u64 = max_dist as u64;
+
+    while i + 32 <= length {
+        difference += popcnt_record_32(a.as_ptr().add(i), b.as_ptr().add(i));
+        if max_dist >= 0 && difference > max_dist_u64 {
+            return u64::MAX;
+        }
+        i += 32;
+    }
+    while i + 8 <= length {
+        let av = core::ptr::read_unaligned(a.as_ptr().add(i) as *const u64);
+        let bv = core::ptr::read_unaligned(b.as_ptr().add(i) as *const u64);
+        difference += (av ^ bv).count_ones() as u64;
+        i += 8;
+    }
+    while i < length {
+        difference += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones() as u64;
+        i += 1;
+    }
+    if max_dist >= 0 && difference > max_dist_u64 {
+        u64::MAX
+    } else {
+        difference
+    }
+}
+
 /// Branchless vectorized hex ASCII → nibble conversion for AVX2.
 /// Same subtract-and-correct strategy as SSE/NEON, but on 32 lanes.
 #[inline]
@@ -357,15 +388,15 @@ pub unsafe fn hamming_distance_string_avx2(a: &[u8], b: &[u8]) -> Result<u64, &'
 
     let mut i = 0;
     let mut total = _mm256_setzero_si256();
+    let mut bad_acc = _mm256_setzero_si256();
 
-    // Process 64 hex chars × 4 iterations (256 chars) per batched SAD+accumulate.
+    // Process 64 hex chars × 2 iterations (128 chars) per batched SAD+accumulate.
     // Each nibble XOR produces max 4 set bits, and we accumulate popcount values
-    // 0-4 per byte. After 8 iterations (8 loads of 32 nibbles per accumulator add),
-    // max per-lane is 8*4 = 32 < 255. We batch 4 iterations of the 64-char loop
-    // = 8 accumulator additions per u8 lane = max 32 per lane.
-    while i + 256 <= length {
+    // 0-4 per byte. Smaller batches keep parsed nibbles in registers on AVX2
+    // targets with only 16 YMM registers.
+    while i + 128 <= length {
         let mut acc = _mm256_setzero_si256();
-        for _ in 0..4 {
+        for _ in 0..2 {
             let a_lo = hex_parse_avx2(
                 _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i),
                 case_mask,
@@ -410,10 +441,7 @@ pub unsafe fn hamming_distance_string_avx2(a: &[u8], b: &[u8]) -> Result<u64, &'
                 _mm256_cmpgt_epi8(zero, or_lo),
                 _mm256_cmpgt_epi8(zero, or_hi),
             );
-            let bad = _mm256_or_si256(invalid, negative);
-            if _mm256_testz_si256(bad, bad) == 0 {
-                return Err("hex string contains invalid char");
-            }
+            bad_acc = _mm256_or_si256(bad_acc, _mm256_or_si256(invalid, negative));
 
             // XOR nibbles → VPSHUFB nibble-popcount LUT (values 0-15 → 0-4)
             let xor_lo = _mm256_xor_si256(a_lo, b_lo);
@@ -473,10 +501,7 @@ pub unsafe fn hamming_distance_string_avx2(a: &[u8], b: &[u8]) -> Result<u64, &'
             _mm256_cmpgt_epi8(zero, or_lo),
             _mm256_cmpgt_epi8(zero, or_hi),
         );
-        let bad = _mm256_or_si256(invalid, negative);
-        if _mm256_testz_si256(bad, bad) == 0 {
-            return Err("hex string contains invalid char");
-        }
+        bad_acc = _mm256_or_si256(bad_acc, _mm256_or_si256(invalid, negative));
 
         let xor_lo = _mm256_xor_si256(a_lo, b_lo);
         let xor_hi = _mm256_xor_si256(a_hi, b_hi);
@@ -487,6 +512,10 @@ pub unsafe fn hamming_distance_string_avx2(a: &[u8], b: &[u8]) -> Result<u64, &'
         i += 64;
     }
     total = _mm256_add_epi64(total, _mm256_sad_epu8(acc, zero));
+
+    if _mm256_testz_si256(bad_acc, bad_acc) == 0 {
+        return Err("hex string contains invalid char");
+    }
 
     // Extract final sum
     let mut difference = (_mm256_extract_epi64(total, 0)
@@ -1293,6 +1322,303 @@ pub unsafe fn hamming_distance_string_avx512_with_max(
 }
 
 // -----------------------------------------------------------------------------
+// AVX2/POPCNT fixed-width catalog scanners and pairwise kernels.
+//
+// AVX2-only hosts previously had no fixed-width scanner, so catalog scans made
+// one indirect byte-kernel call per record; 16/32-byte records then re-entered
+// the AVX2 small-input fallback and tail-called SSE. These loops keep the
+// resolved AVX2+POPCNT feature contract but make the fixed widths straight-line
+// record loops with explicit batching and no per-record function call.
+// -----------------------------------------------------------------------------
+
+#[inline(always)]
+unsafe fn popcnt_record_8(record: *const u8, query: *const u8) -> u64 {
+    let r0 = core::ptr::read_unaligned(record as *const u64);
+    let q0 = core::ptr::read_unaligned(query as *const u64);
+    (r0 ^ q0).count_ones() as u64
+}
+
+#[inline(always)]
+unsafe fn popcnt_record_16(record: *const u8, query: *const u8) -> u64 {
+    popcnt_record_8(record, query) + popcnt_record_8(record.add(8), query.add(8))
+}
+
+#[inline(always)]
+unsafe fn popcnt_record_32(record: *const u8, query: *const u8) -> u64 {
+    popcnt_record_16(record, query) + popcnt_record_16(record.add(16), query.add(16))
+}
+
+#[inline(always)]
+unsafe fn popcnt_record_64(record: *const u8, query: *const u8) -> u64 {
+    popcnt_record_32(record, query) + popcnt_record_32(record.add(32), query.add(32))
+}
+
+#[inline(always)]
+unsafe fn avx2_distance_for_width<const WIDTH: usize>(record: *const u8, query: *const u8) -> u64 {
+    match WIDTH {
+        8 => popcnt_record_8(record, query),
+        16 => popcnt_record_16(record, query),
+        32 => popcnt_record_32(record, query),
+        64 => popcnt_record_64(record, query),
+        _ => core::hint::unreachable_unchecked(),
+    }
+}
+
+#[inline(always)]
+unsafe fn array_first_avx2<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<usize> {
+    let count = big_array.len() / WIDTH;
+    let query = small_array.as_ptr();
+    let records = big_array.as_ptr();
+    let mut index = 0usize;
+
+    while index + 8 <= count {
+        for lane in 0..8 {
+            let d = avx2_distance_for_width::<WIDTH>(records.add((index + lane) * WIDTH), query);
+            if within_fixed_threshold(d, max_dist) {
+                return Some(index + lane);
+            }
+        }
+        index += 8;
+    }
+    while index < count {
+        let d = avx2_distance_for_width::<WIDTH>(records.add(index * WIDTH), query);
+        if within_fixed_threshold(d, max_dist) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+#[inline(always)]
+unsafe fn array_best_avx2<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Option<(u64, usize)> {
+    let count = big_array.len() / WIDTH;
+    let query = small_array.as_ptr();
+    let records = big_array.as_ptr();
+    let mut best: Option<(u64, usize)> = None;
+    let mut index = 0usize;
+
+    while index + 8 <= count {
+        for lane in 0..8 {
+            let candidate_index = index + lane;
+            let d = avx2_distance_for_width::<WIDTH>(records.add(candidate_index * WIDTH), query);
+            let eligible = match best {
+                Some((best_distance, _)) => d < best_distance,
+                None => within_fixed_threshold(d, max_dist),
+            };
+            if eligible {
+                best = Some((d, candidate_index));
+                if d == 0 {
+                    return best;
+                }
+            }
+        }
+        index += 8;
+    }
+    while index < count {
+        let d = avx2_distance_for_width::<WIDTH>(records.add(index * WIDTH), query);
+        let eligible = match best {
+            Some((best_distance, _)) => d < best_distance,
+            None => within_fixed_threshold(d, max_dist),
+        };
+        if eligible {
+            best = Some((d, index));
+            if d == 0 {
+                return best;
+            }
+        }
+        index += 1;
+    }
+    best
+}
+
+#[inline(always)]
+unsafe fn array_all_avx2<const WIDTH: usize>(
+    big_array: &[u8],
+    small_array: &[u8],
+    max_dist: i64,
+) -> Vec<(u64, usize)> {
+    let count = big_array.len() / WIDTH;
+    let query = small_array.as_ptr();
+    let records = big_array.as_ptr();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+
+    while index + 8 <= count {
+        for lane in 0..8 {
+            let candidate_index = index + lane;
+            let d = avx2_distance_for_width::<WIDTH>(records.add(candidate_index * WIDTH), query);
+            if within_fixed_threshold(d, max_dist) {
+                out.push((d, candidate_index));
+            }
+        }
+        index += 8;
+    }
+    while index < count {
+        let d = avx2_distance_for_width::<WIDTH>(records.add(index * WIDTH), query);
+        if within_fixed_threshold(d, max_dist) {
+            out.push((d, index));
+        }
+        index += 1;
+    }
+    out
+}
+
+macro_rules! avx2_scanner_fns {
+    ($first:ident, $best:ident, $all:ident, $width:expr) => {
+        #[target_feature(enable = "avx2", enable = "popcnt")]
+        pub(crate) unsafe fn $first(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<usize> {
+            array_first_avx2::<$width>(big_array, small_array, max_dist)
+        }
+
+        #[target_feature(enable = "avx2", enable = "popcnt")]
+        pub(crate) unsafe fn $best(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<(u64, usize)> {
+            array_best_avx2::<$width>(big_array, small_array, max_dist)
+        }
+
+        #[target_feature(enable = "avx2", enable = "popcnt")]
+        pub(crate) unsafe fn $all(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Vec<(u64, usize)> {
+            array_all_avx2::<$width>(big_array, small_array, max_dist)
+        }
+    };
+}
+
+avx2_scanner_fns!(array_first_avx2_8, array_best_avx2_8, array_all_avx2_8, 8);
+avx2_scanner_fns!(
+    array_first_avx2_16,
+    array_best_avx2_16,
+    array_all_avx2_16,
+    16
+);
+avx2_scanner_fns!(
+    array_first_avx2_32,
+    array_best_avx2_32,
+    array_all_avx2_32,
+    32
+);
+avx2_scanner_fns!(
+    array_first_avx2_64,
+    array_best_avx2_64,
+    array_all_avx2_64,
+    64
+);
+
+macro_rules! avx2_dispatch_fns {
+    ($first_dispatch:ident, $best_dispatch:ident, $all_dispatch:ident, $first:ident, $best:ident, $all:ident) => {
+        #[inline]
+        pub(crate) fn $first_dispatch(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<usize> {
+            unsafe { $first(big_array, small_array, max_dist) }
+        }
+
+        #[inline]
+        pub(crate) fn $best_dispatch(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Option<(u64, usize)> {
+            unsafe { $best(big_array, small_array, max_dist) }
+        }
+
+        #[inline]
+        pub(crate) fn $all_dispatch(
+            big_array: &[u8],
+            small_array: &[u8],
+            max_dist: i64,
+        ) -> Vec<(u64, usize)> {
+            unsafe { $all(big_array, small_array, max_dist) }
+        }
+    };
+}
+
+avx2_dispatch_fns!(
+    array_first_avx2_8_dispatch,
+    array_best_avx2_8_dispatch,
+    array_all_avx2_8_dispatch,
+    array_first_avx2_8,
+    array_best_avx2_8,
+    array_all_avx2_8
+);
+avx2_dispatch_fns!(
+    array_first_avx2_16_dispatch,
+    array_best_avx2_16_dispatch,
+    array_all_avx2_16_dispatch,
+    array_first_avx2_16,
+    array_best_avx2_16,
+    array_all_avx2_16
+);
+avx2_dispatch_fns!(
+    array_first_avx2_32_dispatch,
+    array_best_avx2_32_dispatch,
+    array_all_avx2_32_dispatch,
+    array_first_avx2_32,
+    array_best_avx2_32,
+    array_all_avx2_32
+);
+avx2_dispatch_fns!(
+    array_first_avx2_64_dispatch,
+    array_best_avx2_64_dispatch,
+    array_all_avx2_64_dispatch,
+    array_first_avx2_64,
+    array_best_avx2_64,
+    array_all_avx2_64
+);
+
+#[target_feature(enable = "avx2", enable = "popcnt")]
+pub(crate) unsafe fn pairwise_avx2_fixed<const WIDTH: usize>(a: &[u8], b: &[u8], out: &mut [u8]) {
+    let count = a.len() / WIDTH;
+    let mut index = 0usize;
+    while index + 8 <= count {
+        for lane in 0..8 {
+            let i = index + lane;
+            let d = avx2_distance_for_width::<WIDTH>(
+                a.as_ptr().add(i * WIDTH),
+                b.as_ptr().add(i * WIDTH),
+            );
+            out.as_mut_ptr()
+                .add(i * 8)
+                .cast::<u64>()
+                .write_unaligned(d.to_le());
+        }
+        index += 8;
+    }
+    while index < count {
+        let d = avx2_distance_for_width::<WIDTH>(
+            a.as_ptr().add(index * WIDTH),
+            b.as_ptr().add(index * WIDTH),
+        );
+        out.as_mut_ptr()
+            .add(index * 8)
+            .cast::<u64>()
+            .write_unaligned(d.to_le());
+        index += 1;
+    }
+}
+
+// -----------------------------------------------------------------------------
 // AVX-512 BITALG cross-record scanners for fixed-width catalogs (widths 16, 32).
 //
 // Modeled on the NEON `array_first_neon` / `array_best_neon` / `array_all_neon`
@@ -2023,5 +2349,104 @@ mod tests {
         );
         let all = unsafe { array_all_avx512_16(&big, &small, 1) };
         assert_eq!(all, vec![(0, 3), (1, 5), (0, 7), (0, 13), (1, 15)]);
+    }
+
+    fn avx2_hw_available() -> bool {
+        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt")
+    }
+
+    fn assert_avx2_scanners_match_oracle(width: usize, count: usize, seed: u64) {
+        let mut rng = SplitMix::new(seed);
+        let small = rng.vec(width);
+        let mut big = rng.vec(count * width);
+        if count > 3 {
+            big[width..2 * width].copy_from_slice(&small);
+            big[(count - 1) * width..count * width].copy_from_slice(&small);
+        }
+        for &max_dist in &[-1i64, 0, 1, 7, 32, 64, 128, 256, 512] {
+            let (efirst, ebest, eall) = oracle_first_best_all(&big, &small, max_dist);
+            let (afirst, abest, aall) = unsafe {
+                match width {
+                    8 => (
+                        array_first_avx2_8(&big, &small, max_dist),
+                        array_best_avx2_8(&big, &small, max_dist),
+                        array_all_avx2_8(&big, &small, max_dist),
+                    ),
+                    16 => (
+                        array_first_avx2_16(&big, &small, max_dist),
+                        array_best_avx2_16(&big, &small, max_dist),
+                        array_all_avx2_16(&big, &small, max_dist),
+                    ),
+                    32 => (
+                        array_first_avx2_32(&big, &small, max_dist),
+                        array_best_avx2_32(&big, &small, max_dist),
+                        array_all_avx2_32(&big, &small, max_dist),
+                    ),
+                    64 => (
+                        array_first_avx2_64(&big, &small, max_dist),
+                        array_best_avx2_64(&big, &small, max_dist),
+                        array_all_avx2_64(&big, &small, max_dist),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(
+                afirst, efirst,
+                "first width={width} count={count} max={max_dist}"
+            );
+            assert_eq!(
+                abest, ebest,
+                "best width={width} count={count} max={max_dist}"
+            );
+            assert_eq!(aall, eall, "all width={width} count={count} max={max_dist}");
+        }
+    }
+
+    #[test]
+    fn avx2_scanners_random_oracle_various_widths_counts() {
+        if !avx2_hw_available() {
+            return;
+        }
+        for &width in &[8usize, 16, 32, 64] {
+            for &count in &[0usize, 1, 2, 7, 8, 9, 15, 16, 17, 33, 128] {
+                assert_avx2_scanners_match_oracle(
+                    width,
+                    count,
+                    0xA5A5_1234 ^ count as u64 ^ width as u64,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn avx2_pairwise_fixed_widths_match_scalar() {
+        if !avx2_hw_available() {
+            return;
+        }
+        for &width in &[8usize, 16, 32, 64] {
+            for &count in &[0usize, 1, 7, 8, 9, 31] {
+                let mut rng = SplitMix::new(0x55AA_7788 ^ width as u64 ^ count as u64);
+                let a = rng.vec(width * count);
+                let b = rng.vec(width * count);
+                let mut out = vec![0u8; count * 8];
+                unsafe {
+                    match width {
+                        8 => pairwise_avx2_fixed::<8>(&a, &b, &mut out),
+                        16 => pairwise_avx2_fixed::<16>(&a, &b, &mut out),
+                        32 => pairwise_avx2_fixed::<32>(&a, &b, &mut out),
+                        64 => pairwise_avx2_fixed::<64>(&a, &b, &mut out),
+                        _ => unreachable!(),
+                    }
+                }
+                for i in 0..count {
+                    let got = u64::from_le_bytes(out[i * 8..(i + 1) * 8].try_into().unwrap());
+                    let want = scalar_byte_distance(
+                        &a[i * width..(i + 1) * width],
+                        &b[i * width..(i + 1) * width],
+                    );
+                    assert_eq!(got, want, "pairwise width={width} count={count} index={i}");
+                }
+            }
+        }
     }
 }

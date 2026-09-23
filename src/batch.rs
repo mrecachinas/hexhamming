@@ -46,6 +46,16 @@ pub fn bytes_pairwise_distances(
     if neon_pairwise_enabled(element_size) {
         return Ok(crate::neon_block::pairwise_distances(a, b, element_size));
     }
+    #[cfg(target_arch = "x86_64")]
+    if x86_pairwise_avx2_enabled() && matches!(element_size, 8 | 16 | 32 | 64) {
+        let mut out = vec![0u64; count];
+        // x86_64 is little-endian, so each u64's little-endian byte image is
+        // its native representation and the kernel can write in place.
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), count * 8) };
+        write_pairwise_avx2(a, b, element_size, bytes);
+        return Ok(out);
+    }
     let kernel = select_bytes_kernel_for_width(element_size);
     Ok(a.chunks_exact(element_size)
         .zip(b.chunks_exact(element_size))
@@ -90,6 +100,11 @@ pub fn bytes_pairwise_distances_into(
         crate::neon_block::pairwise_distances_into(a, b, element_size, out);
         return Ok(count);
     }
+    #[cfg(target_arch = "x86_64")]
+    if x86_pairwise_avx2_enabled() && matches!(element_size, 8 | 16 | 32 | 64) {
+        write_pairwise_avx2(a, b, element_size, out);
+        return Ok(count);
+    }
     let kernel = select_bytes_kernel_for_width(element_size);
     for ((a_chunk, b_chunk), out_chunk) in a
         .chunks_exact(element_size)
@@ -110,6 +125,29 @@ fn neon_pairwise_enabled(element_size: usize) -> bool {
     let algo = CURRENT_ALGO.load(std::sync::atomic::Ordering::Relaxed);
     (algo == ALGO_NATIVE || algo == ALGO_NEON)
         && crate::neon_block::has_pairwise_kernel(element_size)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn x86_pairwise_avx2_enabled() -> bool {
+    let algo = crate::CURRENT_ALGO.load(std::sync::atomic::Ordering::Relaxed);
+    (algo == crate::ALGO_NATIVE || algo == crate::ALGO_AVX2)
+        && is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("popcnt")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn write_pairwise_avx2(a: &[u8], b: &[u8], element_size: usize, out: &mut [u8]) {
+    unsafe {
+        match element_size {
+            8 => crate::x86_simd::pairwise_avx2_fixed::<8>(a, b, out),
+            16 => crate::x86_simd::pairwise_avx2_fixed::<16>(a, b, out),
+            32 => crate::x86_simd::pairwise_avx2_fixed::<32>(a, b, out),
+            64 => crate::x86_simd::pairwise_avx2_fixed::<64>(a, b, out),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Validate common catalog + queries inputs and return `(query_count,
