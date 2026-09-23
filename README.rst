@@ -268,17 +268,21 @@ linearly is faster and uses the cheaper one. Widths that cannot be indexed
 within the memory cap always scan. Either way the results, including
 tie-breaking, are identical to the free functions.
 
-Measured on an Apple M4 Max with 1M records, ``best_within`` for one query:
+Measured on an Apple M4 Max with 1M records, ``best_within`` for one query
+(the free function scans on every core):
 
 ======  ======  =============  ===========  ========
 width   radius  free function  indexed      speedup
 ======  ======  =============  ===========  ========
-8 B     2       114 µs         82 ns        1392x
-8 B     8       114 µs         1.3 µs       88x
-8 B     12      108 µs         56 µs        1.9x
-32 B    8       178 µs         144 ns       1237x
-32 B    32      177 µs         5.8 µs       31x
+8 B     2       17.3 µs        92 ns        189x
+8 B     8       16.9 µs        1.4 µs       12x
+8 B     12      19.2 µs        18.6 µs      1.0x
+32 B    8       116 µs         143 ns       811x
+32 B    32      94.6 µs        6.1 µs       16x
 ======  ======  =============  ===========  ========
+
+At radius 12 on 8-byte records the planner expects probing to cost more than
+a scan, so ``best_within`` scans linearly.
 
 Building the index took 24 ms for the 8-byte catalog and 91 ms for the
 32-byte one.
@@ -320,8 +324,212 @@ the Python buffer protocol.
 Benchmark
 ---------
 
-For repeatable AVX2 and AVX-512 investigations, run the same checkout three
-times on each representative x86 machine:
+Unless noted otherwise, the numbers below were measured on an Apple M4 Max
+(ARM64, 12 performance and 4 efficiency cores, 64 GiB) with ``rustc`` 1.98.1
+and Python 3.14.7, using a local build without profile-guided optimization
+(release wheels built natively with PGO are 4–11% faster on small calls).
+Python tables come from ``scripts/readme_benchmarks.py``: each value is the
+median of seven runs, each the best of seven ``timeit`` repeats. Rust numbers
+are Criterion medians of three runs (``cargo bench --no-default-features``
+with ``--warm-up-time 1 --measurement-time 1 --sample-size 20``). Scans that
+use the thread pool vary by up to ~30% between runs.
+
+Raw Rust (no Python overhead)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+===========================================  =========
+Name                                         Mean (ns)
+===========================================  =========
+hex_string (NEON) [16 chars]                       1.7
+hex_string (NEON) [64 chars]                       3.7
+hex_string (NEON) [128 chars]                      7.3
+hex_string (NEON) [254 chars]                     14.0
+bytes (native) [8 bytes]                           1.1
+bytes (native) [32 bytes]                          1.6
+bytes (native) [64 bytes]                          2.1
+bytes (native) [127 bytes]                         5.3
+bytes_within_dist [127 bytes]                      1.6
+array first [512×16, at start]                     5.4
+array first [512×16, at end]                     101.6
+array best [512×16, exact at start]                5.7
+array best [512×16, exact at end]                104.6
+array all [512×16]                               106.5
+array best [16384×64, match at mid]              5,750
+array all [16384×64, match at mid]               4,780
+array best [100000×128, exact match at 100]        158
+array all [100000×128, parallel]                22,660
+===========================================  =========
+
+Block scanners compare 16 records at a time, so a match on the very first
+record costs a whole block (~5 ns) instead of one comparison; every later
+position is several times faster. On AArch64, LLVM's auto-vectorized native
+byte loop is faster than a hand-written NEON byte kernel for these sizes.
+Large array scans are split into chunks that a small built-in thread pool
+claims dynamically.
+
+Fixed-width array matrix, 1024 records, deterministic random no-match and
+exact-midpoint cases:
+
+=======================  ============  ============
+Case                     16-byte (ns)  32-byte (ns)
+=======================  ============  ============
+random no-match / first         207.6         419.9
+random no-match / best          208.4         434.6
+random no-match / all           211.5         442.2
+exact midpoint / first          109.9         209.8
+exact midpoint / best           108.6         212.5
+exact midpoint / all            215.2         422.7
+=======================  ============  ============
+
+Python API
+~~~~~~~~~~
+
+These include the Python call, argument parsing and buffer access:
+
+=====================================================  =========
+Name                                                   Mean (ns)
+=====================================================  =========
+hamming_distance_string [3 chars, same]                     26.8
+hamming_distance_string [3 chars, diff]                     30.7
+hamming_distance_string [64 chars, diff]                    36.2
+hamming_distance_string [1024 chars, diff]                  78.8
+hamming_distance_bytes [3 bytes, same]                      31.0
+hamming_distance_bytes [3 bytes, diff]                      31.5
+hamming_distance_bytes [64 bytes, diff]                     32.3
+hamming_distance_bytes [1024 bytes, diff]                   51.9
+hamming_distance_bytes [64-byte bytearray]                  39.2
+hamming_distance_bytes [64-byte memoryview]                 42.9
+check_hexstrings_within_dist [1000 chars, early exit]       30.4
+check_bytes_within_dist [16 bytes]                          30.7
+check_bytes_within_dist [64 bytes]                          31.4
+check_bytes_within_dist [127 bytes]                         34.3
+first_within_dist [512×16, at start]                        39.7
+first_within_dist [512×16, mid]                             87.1
+first_within_dist [512×16, at end]                         128.3
+first_within_dist [16384×64, at start]                      54.3
+first_within_dist [16384×64, mid]                        4,535.3
+first_within_dist [16384×64, at end]                     4,645.5
+best_within_dist [512×16, at start]                         44.6
+best_within_dist [512×16, at end]                          143.8
+best_within_dist [16384×64, mid]                         4,802.0
+all_within_dist [512×16, at start]                         161.3
+all_within_dist [512×16, at end]                           162.5
+all_within_dist [16384×64, mid]                          4,640.4
+=====================================================  =========
+
+The same fixed-width matrix end to end (1024 records):
+
+=======================  ============  ============
+Case                     16-byte (ns)  32-byte (ns)
+=======================  ============  ============
+random no-match / first         226.8         467.8
+random no-match / best          246.4         460.7
+random no-match / all           238.7         457.4
+exact midpoint / first          133.4         238.8
+exact midpoint / best           150.4         261.0
+exact midpoint / all            273.8         480.0
+=======================  ============  ============
+
+For random inputs, the direct APIs also avoid the temporary big integers used
+by an equivalent standard-library implementation:
+
+================  ===============  ===========  =======
+Input             hexhamming (ns)  stdlib (ns)  Speedup
+================  ===============  ===========  =======
+bytes [16]                   31.4        156.9    4.99×
+bytes [64]                   32.7        240.5    7.37×
+bytes [1024]                 52.2      1,944.0   37.22×
+hex [16 chars]               30.4        120.9    3.98×
+hex [64 chars]               36.5        196.4    5.38×
+hex [1024 chars]             79.9      1,732.2   21.67×
+================  ===============  ===========  =======
+
+For small ``str`` and ``bytes`` inputs, the call itself dominates (roughly
+30 ns on this machine). For large inputs (1024+ chars, 16384-element arrays),
+computation dominates and Python overhead is negligible. Byte operations
+release the GIL at 16 KiB, while immutable strings use a zero-copy detached
+path from 4 KiB. Array wrappers release the GIL at 64 KiB. Array scans run on
+a built-in thread pool from 512 KiB for widths with a block scanner
+(8/16/32/64 bytes) and from 64 KiB for other widths, the measured crossovers
+on this machine. Set ``HEXHAMMING_NUM_THREADS`` to limit the pool (``1``
+disables it). The ``first`` and ``best`` variants scan a short prefix serially
+and stop early, so a match near the start is much faster than one near the
+end; batches of them likewise start serially and only spread across threads
+once they prove expensive.
+
+Large catalogs
+~~~~~~~~~~~~~~
+
+One query against a large catalog uses every core; at 64 MiB the scan is
+bound by memory bandwidth (~270 GB/s):
+
+=================================  ==========  =========  ========
+Catalog                            first (ns)  best (ns)  all (ns)
+=================================  ==========  =========  ========
+1 MiB, 16-byte records, no match      5,594.8    6,019.1   4,442.2
+16 MiB, 16-byte records, no match    33,805.1   34,924.4  30,559.1
+64 MiB, 16-byte records, no match     240,981    246,913   236,442
+=================================  ==========  =========  ========
+
+Batch APIs vs. Python for-loops
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The "loop" columns run the equivalent single-call API inside a Python
+for-loop.
+
+Pairwise distances between two contiguous buffers of ``count`` records:
+
+==================  =========  =========  ===========  =========
+Case                loop (ns)  list (ns)  packed (ns)  into (ns)
+==================  =========  =========  ===========  =========
+pairwise 100×16      10,559.1      326.9        176.7       82.8
+pairwise 1,000×16     109,158    2,474.0      1,004.1      377.7
+pairwise 10,000×16  1,114,309   24,482.0     10,213.5    3,497.0
+pairwise 100×32      10,618.4      364.5        221.5       94.5
+pairwise 1,000×32     109,849    2,875.0      1,520.0      489.9
+pairwise 10,000×32  1,100,303   28,953.9     15,064.2    5,883.6
+==================  =========  =========  ===========  =========
+
+Multi-query catalog scans against a 1,024×16-byte catalog with 100 queries:
+
+=============================================  =========  ==========
+Case                                           loop (ns)  batch (ns)
+=============================================  =========  ==========
+first_many 100×1024×16 (permissive threshold)    2,646.4       467.7
+best_many 100×1024×16 (max_dist=128)            26,027.8     7,871.2
+=============================================  =========  ==========
+
+Dense-match transport for a single query against a 1,024×16-byte catalog:
+
+=====================================  =========  ===========  =========
+Case                                   list (ns)  packed (ns)  into (ns)
+=====================================  =========  ===========  =========
+all 1024×16 (max_dist=128, all match)   18,611.5      1,697.6      967.6
+=====================================  =========  ===========  =========
+
+Interpretation:
+
+* Pairwise: the ``list`` API is 29–46× faster than the Python for-loop and is
+  the recommended default. ``packed`` and ``into`` skip the per-distance
+  Python ``int`` allocation for another 1.7–2.5× and 4–7× respectively; use
+  them when the caller can consume little-endian ``u64`` bytes directly.
+* ``first_many`` with a permissive threshold is a large win (≈5.7×): every
+  inner scan stops at its first record, so per-call overhead dominates the
+  loop, and a batch of such cheap scans runs serially rather than waking the
+  thread pool. ``best_many`` and ``all_many`` scan the whole catalog for each
+  query; batches as large as this one are spread across threads (≈3.3×).
+* Dense ``all_within_dist``: ``packed`` avoids allocating ``num_records``
+  Python 2-tuples (≈11×); ``into`` additionally reuses caller-owned
+  buffers (≈19×).
+
+x86 (AVX2 and AVX-512)
+~~~~~~~~~~~~~~~~~~~~~~
+
+CI runs the test suite under the Intel Software Development Emulator on
+Nehalem, Haswell, Skylake-X and Ice Lake CPU models, so the SSE4.1, AVX2 and
+AVX-512 paths are all checked for correctness, and the Benchmark workflow
+runs on every pull request. For repeatable performance measurements, run the
+same checkout three times on each representative x86 machine:
 
 .. code-block:: bash
 
@@ -333,11 +541,10 @@ The script records CPU features and tool versions alongside Criterion output
 and end-to-end Python benchmark JSON. Compare results only between runs from
 the same machine.
 
-AVX-512 results
-~~~~~~~~~~~~~~~~
-
-Three-run medians on a Google Cloud ``c4-standard-4`` with an Intel Xeon
-Platinum 8581C (Emerald Rapids):
+The results below were measured with the AVX-512 kernels that preceded the
+current AVX-512 block scanners, and have not been repeated on AVX-512
+hardware since. Three-run medians on a Google Cloud ``c4-standard-4`` with an
+Intel Xeon Platinum 8581C (Emerald Rapids):
 
 .. list-table::
    :header-rows: 1
@@ -375,192 +582,3 @@ The AVX-512 byte kernel also uses masked loads below 64 bytes, improving the
 measured 16-, 32-, 48-, and 63-byte Rust paths by 33%, 50%, 70%, and 194%
 respectively. AVX2-only tuning remains hardware-dependent and should be
 measured separately on a machine without AVX-512.
-
-All benchmarks were run on an Apple M4 Max (ARM64, 16 logical cores, 64 GiB)
-with hexhamming v3.0.0, ``rustc`` 1.97.1, and Python 3.14.6. Values are the
-median of the means from three independent runs.
-
-Raw Rust (no Python overhead)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-These numbers show the pure computation time using Rust's ``criterion`` benchmarks
-(``cargo bench --no-default-features``), with no Python/PyO3 overhead.
-
-Issue #51 fixed-width array matrix (1024 records; median of three run medians)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The matrix uses deterministic random no-match and exact-midpoint cases for
-16-byte and 32-byte records. Each run uses
-``--warm-up-time 1 --measurement-time 1 --sample-size 20``.
-
-====================================  ===========  ===========
-Case                                 16-byte (ns) 32-byte (ns)
-====================================  ===========  ===========
-random no-match / first                    397.5        797.8
-random no-match / best                     407.0        992.2
-random no-match / all                      523.7       1047.7
-exact midpoint / first                    216.3        422.7
-exact midpoint / best                     216.6        414.0
-exact midpoint / all                      540.9        822.0
-====================================  ===========  ===========
-
-================================================  ===========
-Name                                              Mean (ns)
-================================================  ===========
-hex_string (NEON) [16 chars]                           1.6
-hex_string (NEON) [64 chars]                           5.4
-hex_string (NEON) [128 chars]                         10.5
-hex_string (NEON) [254 chars]                         19.7
-bytes (native) [8 bytes]                               1.1
-bytes (native) [32 bytes]                              1.5
-bytes (native) [64 bytes]                              2.1
-bytes (native) [127 bytes]                             5.5
-bytes_within_dist [127 bytes]                          1.6
-array first [512×16, at start]                         1.9
-array first [512×16, at end]                         402.4
-array best [512×16, exact at start]                     3.3
-array best [512×16, exact at end]                     526.4
-array all [512×16]                                    449.0
-array best [16384×64, match at mid]                10,986.0
-array all [16384×64, match at mid]                 20,350.0
-array best [100000×128, parallel]                  46,547.0
-array all [100000×128, parallel]                   99,266.0
-================================================  ===========
-
-On AArch64, LLVM's auto-vectorized native byte loop is faster than the
-hand-written NEON byte kernel for these sizes. Large array scans are split into
-chunks that a small built-in thread pool claims dynamically.
-
-Python API (via PyO3)
-~~~~~~~~~~~~~~~~~~~~~
-
-These numbers include Python wrapper and function-call overhead using
-``pytest-benchmark``.
-
-======================================================  ===========
-Name                                                      Mean (ns)
-======================================================  ===========
-hamming_distance_string [3 chars, same]                       37.1
-hamming_distance_string [3 chars, diff]                       70.7
-hamming_distance_string [64 chars, diff]                      39.8
-hamming_distance_string [1024 chars, diff]                   116.4
-hamming_distance_bytes [3 bytes, same]                        33.4
-hamming_distance_bytes [3 bytes, diff]                        39.9
-hamming_distance_bytes [64 bytes, diff]                       33.9
-hamming_distance_bytes [1024 bytes, diff]                     44.6
-hamming_distance_bytes [64-byte bytearray]                    50.6
-hamming_distance_bytes [64-byte memoryview]                   51.5
-check_hexstrings_within_dist [1000 chars]                     37.3
-check_bytes_within_dist [16 bytes]                            34.3
-check_bytes_within_dist [64 bytes]                            33.7
-check_bytes_within_dist [127 bytes]                           34.7
-first_within_dist [512×16, at start]                          35.6
-first_within_dist [512×16, mid]                              240.7
-first_within_dist [512×16, at end]                           440.5
-first_within_dist [16384×64, at start]                        74.2
-first_within_dist [16384×64, mid]                         14,319.4
-first_within_dist [16384×64, at end]                      28,619.9
-best_within_dist [512×16, at start]                           47.0
-best_within_dist [512×16, at end]                            584.3
-best_within_dist [16384×64, mid]                          32,031.4
-all_within_dist [512×16, at start]                           530.4
-all_within_dist [512×16, at end]                             537.5
-all_within_dist [16384×64, mid]                           30,725.4
-======================================================  ===========
-
-Issue #51 Python buffer matrix (1024 records; median of three run medians)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-These end-to-end timings use ``timeit.repeat`` with 10,000 calls per sample,
-including the PyO3 wrapper and buffer-protocol path.
-
-====================================  ===========  ===========
-Case                                 16-byte (ns) 32-byte (ns)
-====================================  ===========  ===========
-random no-match / first                    443.4        836.8
-random no-match / best                     487.0        850.2
-random no-match / all                      564.8        851.7
-exact midpoint / first                    272.2        468.1
-exact midpoint / best                     295.0        483.8
-exact midpoint / all                      638.8        921.0
-====================================  ===========  ===========
-
-For random inputs, the direct APIs also avoid the temporary big integers used
-by an equivalent standard-library implementation:
-
-================  ===============  ==============  ========
-Input             hexhamming (ns)  stdlib (ns)     Speedup
-================  ===============  ==============  ========
-bytes [16]                   33.5           158.3     4.72×
-bytes [64]                   37.4           233.1     6.24×
-bytes [1024]                 53.2         2,029.0    38.17×
-hex [16 chars]               37.2           126.3     3.39×
-hex [64 chars]               39.7           200.2     5.05×
-hex [1024 chars]            116.5         1,708.1    14.66×
-================  ===============  ==============  ========
-
-For small exact ``str`` and ``bytes`` inputs, Python call and wrapper overhead
-dominates (roughly 30–40 ns on this machine). For large inputs
-(1024+ chars, 16384-element arrays), computation dominates and Python overhead
-is negligible. Byte operations release the GIL at 16 KiB, while immutable
-strings use a zero-copy detached path from 4 KiB. Array wrappers release the GIL
-at 64 KiB. Array scans run on a built-in thread pool from 512 KiB for widths
-with a block scanner (8/16/32/64 bytes) and from 64 KiB for other widths, the
-measured crossovers on this machine. Set ``HEXHAMMING_NUM_THREADS`` to limit
-the pool (``1`` disables it). The ``first`` and ``best`` variants scan a short
-prefix serially and stop early, so a match near the start is much faster than
-one near the end.
-
-Batch APIs vs. Python for-loops
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-These numbers use ``.benchmarks/batch_measure.py`` (``timeit.repeat`` with 50
-calls per sample, three independent runs, median of medians) on the same M4
-Max. The "loop" columns run the equivalent single-call API inside a Python
-for-loop. Speedups are relative to the loop baseline.
-
-Pairwise distances between two contiguous buffers of ``count`` records:
-
-============================================  ==========  ==========  ==========  ==========
-Case                                          loop (ns)   list (ns)   packed (ns)  into (ns)
-============================================  ==========  ==========  ==========  ==========
-pairwise 100×16                                  15,796.7      598.3       287.5      211.7
-pairwise 1,000×16                              147,985.0    4,494.2     1,528.3    1,245.8
-pairwise 10,000×16                           1,424,663.3   43,612.5    14,660.8   11,720.8
-pairwise 100×32                                  16,091.7      821.7       511.7      438.3
-pairwise 1,000×32                              160,530.0    6,787.5     3,855.0    3,545.8
-pairwise 10,000×32                           1,542,458.3   66,835.8    37,700.8   34,721.7
-============================================  ==========  ==========  ==========  ==========
-
-Multi-query catalog scans against a 1,024×16-byte catalog with 100 queries:
-
-==================================================  ==========  ==========
-Case                                                loop (ns)   batch (ns)
-==================================================  ==========  ==========
-first_many 100×1024×16 (permissive threshold)         10,948.3       742.5
-best_many 100×1024×16 (max_dist=128)                  76,889.2    66,529.2
-==================================================  ==========  ==========
-
-Dense-match transport for a single query against a 1,024×16-byte catalog:
-
-==========================================  ==========  ==========  ==========
-Case                                        list (ns)   packed (ns)  into (ns)
-==========================================  ==========  ==========  ==========
-all 1024×16 (max_dist=128, all match)         30,681.7    3,067.5    2,022.5
-==========================================  ==========  ==========  ==========
-
-Interpretation:
-
-* Pairwise: the ``list`` API is 26–33× faster than the Python for-loop and is
-  the recommended default. ``packed`` and ``into`` skip the per-distance
-  Python ``int`` allocation for another 2–3× on top; use them when the caller
-  can consume little-endian ``u64`` bytes directly.
-* Multi-query ``first_many`` is a very large win (≈15×) because each inner
-  scan short-circuits on the first hit and Python-loop overhead dominates.
-  ``best_many`` and ``all_many`` are more modest wins (≈1.15–1.2×) because
-  their inner scans always traverse the whole catalog and the per-call FFI
-  overhead is proportionally smaller.
-* Dense ``all_within_dist``: ``packed`` avoids allocating ``num_records``
-  Python 2-tuples (≈10×); ``into`` additionally reuses caller-owned
-  buffers (≈15×) and matches the throughput of Rust code that never
-  touches the Python heap.
