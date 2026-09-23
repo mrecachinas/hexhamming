@@ -30,6 +30,8 @@ mod neon_block;
 mod neon_simd;
 #[cfg(feature = "python")]
 mod python;
+#[cfg(feature = "python")]
+mod raw_python;
 #[cfg(test)]
 mod tests;
 #[cfg(target_arch = "x86_64")]

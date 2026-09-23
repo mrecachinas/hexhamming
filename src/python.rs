@@ -1203,6 +1203,12 @@ fn hexhamming(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(set_algo, m)?)?;
 
+    // Replace the hot PyO3 trampolines with raw FASTCALL|KEYWORDS functions.
+    // PyO3 still owns module creation and the rest of the API surface.
+    if unsafe { crate::raw_python::register_all(m.as_ptr()) } < 0 {
+        return Err(PyErr::fetch(m.py()));
+    }
+
     // Auto-detect best algorithm on module load
     #[cfg(target_arch = "x86_64")]
     {

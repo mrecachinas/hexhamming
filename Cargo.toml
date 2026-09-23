@@ -11,11 +11,14 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["python"]
-python = ["pyo3"]
+python = ["pyo3", "pyo3-build-config"]
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
 rayon = "1.10"
+
+[build-dependencies]
+pyo3-build-config = { version = "0.29", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
