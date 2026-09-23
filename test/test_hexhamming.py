@@ -800,6 +800,25 @@ def test_set_algo_roundtrip():
     assert hamming_distance_string("deadbeef", "00000000") == 24
 
 
+def test_functions_are_bound_to_extension_module():
+    """Module functions must not be METH_STATIC (see `pass_module` in python.rs).
+
+    PyO3 marks functions without ``pass_module`` METH_STATIC (``__self__`` is
+    None), which makes CPython 3.14 deopt every specialized call to the generic
+    vectorcall path.
+    """
+    import hexhamming.hexhamming as ext
+
+    names = [
+        name
+        for name in dir(ext)
+        if callable(getattr(ext, name)) and not name.startswith("_")
+    ]
+    assert "hamming_distance_string" in names
+    for name in names:
+        assert getattr(ext, name).__self__ is ext, name
+
+
 # ---------------------------------------------------------------------------
 # check_hexstrings_within_dist: SIMD early-exit correctness + perf
 #

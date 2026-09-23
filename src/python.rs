@@ -18,6 +18,12 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods};
 
+// Every `#[pyfunction]` in this module takes `pass_module` and an unused
+// `_module` argument. Without it PyO3 tags module-level functions with
+// `METH_STATIC`; CPython 3.14's specialized `CALL_BUILTIN_FAST_WITH_KEYWORDS`
+// guard compares the full `ml_flags` against `METH_FASTCALL | METH_KEYWORDS`,
+// so every call would deopt to the generic vectorcall path (~3 ns per call).
+
 // ---------------------------------------------------------------------------
 // §5 helper: zero-copy slice from the Python buffer protocol
 // ---------------------------------------------------------------------------
@@ -186,8 +192,13 @@ impl Drop for SimpleByteBuffer {
 /// Equivalent to `bin(int(a, 16) ^ int(b, 16)).count('1')` but uses SIMD
 /// where available.
 #[pyfunction]
-#[pyo3(signature = (a, b))]
-fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
+#[pyo3(signature = (a, b), pass_module)]
+fn hamming_distance_string(
+    _module: &Bound<'_, PyModule>,
+    py: Python<'_>,
+    a: &str,
+    b: &str,
+) -> PyResult<u64> {
     if a.len() != b.len() {
         return Err(PyValueError::new_err("strings are NOT the same length"));
     }
@@ -219,8 +230,10 @@ fn hamming_distance_string(py: Python<'_>, a: &str, b: &str) -> PyResult<u64> {
 /// **WARNING**: mutating a `bytearray` during computation is undefined
 /// behavior.
 #[pyfunction]
-#[pyo3(signature = (a, b))]
+#[pyo3(signature = (a, b), pass_module)]
 fn hamming_distance_bytes(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
@@ -268,8 +281,13 @@ fn hamming_distance_bytes(
 /// For `len >= 64` uses the SIMD path (full distance then compare).
 /// For shorter strings uses scalar with early termination.
 #[pyfunction]
-#[pyo3(signature = (a, b, max_dist))]
-fn check_hexstrings_within_dist(a: &str, b: &str, max_dist: i64) -> PyResult<bool> {
+#[pyo3(signature = (a, b, max_dist), pass_module)]
+fn check_hexstrings_within_dist(
+    _module: &Bound<'_, PyModule>,
+    a: &str,
+    b: &str,
+    max_dist: i64,
+) -> PyResult<bool> {
     if max_dist < 0 {
         return Err(PyValueError::new_err("`max_dist` must be >0"));
     }
@@ -358,8 +376,10 @@ fn check_hexstrings_within_dist(a: &str, b: &str, max_dist: i64) -> PyResult<boo
 ///
 /// Accepts any buffer-protocol object.
 #[pyfunction]
-#[pyo3(signature = (a, b, max_dist))]
+#[pyo3(signature = (a, b, max_dist), pass_module)]
 fn check_bytes_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
@@ -410,14 +430,16 @@ fn check_bytes_within_dist(
 
 /// Legacy alias for `check_bytes_arrays_first_within_dist`.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist), pass_module)]
 fn check_bytes_arrays_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
     max_dist: i64,
 ) -> PyResult<i64> {
-    check_bytes_arrays_first_within_dist(py, array_of_elems, elem_to_compare, max_dist)
+    check_bytes_arrays_first_within_dist(_module, py, array_of_elems, elem_to_compare, max_dist)
 }
 
 // ---------------------------------------------------------------------------
@@ -427,8 +449,10 @@ fn check_bytes_arrays_within_dist(
 /// Return the index of the first element within a specified Hamming distance,
 /// or -1 if none found.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist), pass_module)]
 fn check_bytes_arrays_first_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
@@ -503,8 +527,10 @@ fn check_bytes_arrays_first_within_dist(
 /// Returns `(best_distance, best_index)`, or `(-1, -1)` if none within
 /// max_dist.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist), pass_module)]
 fn check_bytes_arrays_best_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
@@ -576,8 +602,10 @@ fn check_bytes_arrays_best_within_dist(
 /// Find all elements within a specified Hamming distance.
 /// Returns list of `(distance, index)` tuples.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist), pass_module)]
 fn check_bytes_arrays_all_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
@@ -698,8 +726,10 @@ fn ensure_writable_into_supported() -> PyResult<()> {
 /// `a` and `b` must be equal-length buffer-protocol objects whose length is a
 /// multiple of `element_size`.
 #[pyfunction]
-#[pyo3(signature = (a, b, element_size))]
+#[pyo3(signature = (a, b, element_size), pass_module)]
 fn hamming_distances_bytes(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
@@ -723,8 +753,10 @@ fn hamming_distances_bytes(
 /// Compute Hamming distances and return them as `bytes` of little-endian u64
 /// values (8 bytes per distance).
 #[pyfunction]
-#[pyo3(signature = (a, b, element_size))]
+#[pyo3(signature = (a, b, element_size), pass_module)]
 fn hamming_distances_bytes_packed<'py>(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'py>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
@@ -760,8 +792,10 @@ fn hamming_distances_bytes_packed<'py>(
 /// `count * 8` bytes. Non-contiguous, read-only, or wrong-size outputs are
 /// rejected with `ValueError`.
 #[pyfunction]
-#[pyo3(signature = (a, b, element_size, output))]
+#[pyo3(signature = (a, b, element_size, output), pass_module)]
 fn hamming_distances_bytes_into(
+    _module: &Bound<'_, PyModule>,
+
     _py: Python<'_>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
@@ -859,8 +893,10 @@ where
 /// fixed-width slice of `queries`. Returns a list of `int` indices (or `-1`
 /// when no record matches), one per query.
 #[pyfunction]
-#[pyo3(signature = (catalog, queries, query_width, max_dist))]
+#[pyo3(signature = (catalog, queries, query_width, max_dist), pass_module)]
 fn check_bytes_arrays_first_many_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     catalog: &Bound<'_, PyAny>,
     queries: &Bound<'_, PyAny>,
@@ -880,8 +916,10 @@ fn check_bytes_arrays_first_many_within_dist(
 /// fixed-width slice of `queries`. Returns a list of `(distance, index)`
 /// tuples, using `(-1, -1)` for queries with no match.
 #[pyfunction]
-#[pyo3(signature = (catalog, queries, query_width, max_dist))]
+#[pyo3(signature = (catalog, queries, query_width, max_dist), pass_module)]
 fn check_bytes_arrays_best_many_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     catalog: &Bound<'_, PyAny>,
     queries: &Bound<'_, PyAny>,
@@ -901,8 +939,10 @@ fn check_bytes_arrays_best_many_within_dist(
 /// fixed-width slice of `queries`. Returns a list of lists of
 /// `(distance, index)` tuples, one inner list per query.
 #[pyfunction]
-#[pyo3(signature = (catalog, queries, query_width, max_dist))]
+#[pyo3(signature = (catalog, queries, query_width, max_dist), pass_module)]
 fn check_bytes_arrays_all_many_within_dist(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'_>,
     catalog: &Bound<'_, PyAny>,
     queries: &Bound<'_, PyAny>,
@@ -936,8 +976,10 @@ fn check_bytes_arrays_all_many_within_dist(
 /// distances exceeding `u16::MAX` bits, or if the catalog exceeds
 /// `u32::MAX` records.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist), pass_module)]
 fn check_bytes_arrays_all_within_dist_packed<'py>(
+    _module: &Bound<'_, PyModule>,
+
     py: Python<'py>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
@@ -990,8 +1032,10 @@ fn check_bytes_arrays_all_within_dist_packed<'py>(
 /// and `num_records * 4` bytes respectively); if the resolved match count
 /// exceeds the capacity, `ValueError` is raised.
 #[pyfunction]
-#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist, out_distances, out_indices))]
+#[pyo3(signature = (array_of_elems, elem_to_compare, max_dist, out_distances, out_indices), pass_module)]
 fn check_bytes_arrays_all_within_dist_into(
+    _module: &Bound<'_, PyModule>,
+
     _py: Python<'_>,
     array_of_elems: &Bound<'_, PyAny>,
     elem_to_compare: &Bound<'_, PyAny>,
@@ -1110,7 +1154,8 @@ fn check_bytes_arrays_all_within_dist_into(
 /// **NOTE**: error-as-empty-string is legacy behaviour and will change to
 /// raise `ValueError` in the next major version.
 #[pyfunction]
-fn set_algo(algo_name: &str) -> PyResult<String> {
+#[pyo3(pass_module)]
+fn set_algo(_module: &Bound<'_, PyModule>, algo_name: &str) -> PyResult<String> {
     match crate::api::set_algorithm(algo_name) {
         Ok(()) => Ok(String::new()),
         Err(msg) => Ok(msg.to_string()),
