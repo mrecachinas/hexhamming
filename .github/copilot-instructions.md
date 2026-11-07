@@ -7,7 +7,10 @@ Always reference these instructions first and fallback to search or bash command
 ## Working Effectively
 
 ### Essential Setup Commands
-Run these commands in sequence to set up the development environment:
+The devcontainer (`.devcontainer/`) and Copilot cloud agent setup
+(`.github/workflows/copilot-setup-steps.yml`) already install Rust, ruff, maturin and
+pytest and build the package. Otherwise, run these commands in sequence to set up the
+development environment:
 
 ```bash
 # Install Rust toolchain (if not already installed)
@@ -198,6 +201,8 @@ The project uses GitHub Actions with maturin for cross-platform wheel building:
   `scripts/pgo_bench.py` in the job summary. Nothing is published from pull requests
 - `Benchmark PR` (`benchmark.yml`): benchmarks every PR against its base branch on x86 and
   comments the comparison
+- `Copilot Setup Steps` (`copilot-setup-steps.yml`): prepares the Copilot cloud agent's
+  environment; its ruff pin must match the `lint` job's
 - Builds wheels for Linux (manylinux), macOS, Windows
 - Tests on Python 3.10-3.14
 - **Build time in CI**: 15-45 minutes depending on platform
